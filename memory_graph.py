@@ -168,6 +168,12 @@ class MemoryGraph:
         self.edges = []        # list of ConceptLink
         self._adjacency = defaultdict(set)  # name.lower() -> set of neighbor names
         self._backlinks_cache = defaultdict(set)
+
+        # Homeostatic weight conservation
+        self.total_weight_pool = 0.0
+        self.target_weight_pool = 500.0
+        self._recalc_weight_pool()
+
         self.load()
 
     # ---- Core Operations ----
@@ -210,7 +216,117 @@ class MemoryGraph:
         self._adjacency[s_key].add(t_key)
         self._adjacency[t_key].add(s_key)
         self._backlinks_cache[t_key].add(s_key)
+
+        # Homeostatic conservation — scale back to target
+        self._recalc_weight_pool()
+        if self.total_weight_pool > self.target_weight_pool:
+            self._scale_weights(self.target_weight_pool / self.total_weight_pool)
+
         return link
+
+    def update_link(self, source, target, link_type="related", pre_post_order=0,
+                    plasticity_rate=0.1):
+        """
+        STDP-style asymmetric update.
+        pre_post_order:
+          +1 = source fired before target → potentiate source→target
+          -1 = target fired before source → depress source→target
+           0 = simultaneous → weak bidirectional potentiation
+        """
+        s_key = source.lower().strip()
+        t_key = target.lower().strip()
+
+        existing = None
+        for link in self.edges:
+            if link.source == s_key and link.target == t_key:
+                existing = link
+                break
+
+        if pre_post_order > 0:
+            delta = plasticity_rate
+            if existing:
+                existing.weight = min(1.0, existing.weight + delta)
+            else:
+                self.add_link(source, target, link_type, weight=plasticity_rate)
+        elif pre_post_order < 0:
+            delta = plasticity_rate * 0.5
+            if existing:
+                existing.weight = max(0.01, existing.weight - delta)
+        else:
+            # Simultaneous — weak bidirectional
+            delta = plasticity_rate * 0.3
+            if existing:
+                existing.weight = min(1.0, existing.weight + delta)
+            else:
+                self.add_link(source, target, link_type, weight=delta)
+
+            # Also add reverse direction weakly
+            rev_link = None
+            for link in self.edges:
+                if link.source == t_key and link.target == s_key:
+                    rev_link = link
+                    break
+            if rev_link:
+                rev_link.weight = min(1.0, rev_link.weight + delta * 0.5)
+            else:
+                self.add_link(target, source, link_type, weight=delta * 0.5)
+
+        # Enforce conservation
+        self._recalc_weight_pool()
+        if self.total_weight_pool > self.target_weight_pool:
+            self._scale_weights(self.target_weight_pool / self.total_weight_pool)
+
+    def decay_links(self, rate=0.005, prune_threshold=0.01):
+        """
+        Decay all link weights. Remove links below threshold.
+        Renormalize to conserve total pool.
+        """
+        total_before = sum(e.weight for e in self.edges)
+        if total_before == 0:
+            return
+
+        for edge in self.edges:
+            edge.weight *= (1.0 - rate)
+
+        # Prune dead links
+        before = len(self.edges)
+        dead = [e for e in self.edges if e.weight < prune_threshold]
+        for e in dead:
+            self._adjacency[e.source].discard(e.target)
+            self._adjacency[e.target].discard(e.source)
+            self._backlinks_cache[e.target].discard(e.source)
+        self.edges = [e for e in self.edges if e.weight >= prune_threshold]
+
+        # Renormalize remaining weights
+        total_after = sum(e.weight for e in self.edges)
+        if total_after > 0 and total_before > 0:
+            scale = min(3.0, total_before / total_after)
+            for edge in self.edges:
+                edge.weight = min(1.0, edge.weight * scale)
+            self._recalc_weight_pool()
+
+    def depress_link(self, source, target, rate=0.1):
+        """Weaken a specific link."""
+        s_key = source.lower().strip()
+        t_key = target.lower().strip()
+        for link in self.edges:
+            if link.source == s_key and link.target == t_key:
+                link.weight = max(0.01, link.weight * (1.0 - rate))
+                break
+
+    def coactivate(self, concept_a, concept_b, strength=0.1):
+        """Strengthen link between co-occurring concepts (Hebbian)."""
+        if concept_a.lower() == concept_b.lower():
+            return
+        self.update_link(concept_a, concept_b, pre_post_order=0, plasticity_rate=strength)
+
+    def _recalc_weight_pool(self):
+        self.total_weight_pool = sum(e.weight for e in self.edges)
+
+    def _scale_weights(self, factor):
+        for e in self.edges:
+            e.weight = min(1.0, e.weight * factor)
+        self._recalc_weight_pool()
 
     def get_concept(self, name):
         """Get a concept node by name (case-insensitive)."""
@@ -441,6 +557,7 @@ class MemoryGraph:
                 self._adjacency[e.source].add(e.target)
                 self._adjacency[e.target].add(e.source)
                 self._backlinks_cache[e.target].add(e.source)
+            self._recalc_weight_pool()
             return True
         except Exception as e:
             print(f"  [MEMORY] Load error: {e}")

@@ -31,6 +31,7 @@ import sys
 import os
 import time
 import json
+import random
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +41,13 @@ from safety_nets import SafetySystem
 from reasoning_engine import ReasoningEngine
 from web_learner import WebLearner
 from memory_graph import MemoryGraph
+from mortality import MortalitySystem
+from emotions import EmotionSystem
+from plasticity import PlasticityEngine
+from developmental import DevelopmentalSystem
+from social_emotion import SocialEmotionSystem
+from curiosity import CuriositySystem
+from narrative_self import NarrativeSelf
 
 
 def print_header():
@@ -168,17 +176,61 @@ def main():
     adhd_enabled = False
 
     # ============================================================
-    # 9. DREAM ENGINE
+    # 9. MORTALITY SYSTEM
+    # ============================================================
+    mortality = MortalitySystem()
+    print(f"      Mortality system active (anxiety: {mortality.anxiety:.2f})")
+
+    # ============================================================
+    # 10. EMOTION SYSTEM
+    # ============================================================
+    emotions = EmotionSystem()
+    print(f"      Emotion system active (mood: {emotions.global_mood.dominant()[0]})")
+
+    # ============================================================
+    # 11. DREAM ENGINE
     # ============================================================
     from dream_engine import DreamEngine
-    dreams = DreamEngine(episodic_memory=episodic, memory_graph=memory_graph)
+    dreams = DreamEngine(episodic_memory=episodic, memory_graph=memory_graph,
+                         emotion_system=emotions)
     print(f"      Dream engine ready")
+
+    # ============================================================
+    # 12. PLASTICITY ENGINE
+    # ============================================================
+    plasticity = PlasticityEngine(episodic_memory=episodic, memory_graph=memory_graph)
+    print(f"      Plasticity engine ready")
+
+    # ============================================================
+    # 13. DEVELOPMENTAL SYSTEM
+    # ============================================================
+    developmental = DevelopmentalSystem()
+    print(f"      Developmental system active (stage: {developmental.stage_name})")
+
+    # ============================================================
+    # 14. SOCIAL EMOTION SYSTEM
+    # ============================================================
+    social = SocialEmotionSystem()
+    print(f"      Social emotion system active")
+
+    # ============================================================
+    # 15. CURIOSITY SYSTEM
+    # ============================================================
+    curiosity = CuriositySystem()
+    print(f"      Curiosity system active")
+
+    # ============================================================
+    # 16. NARRATIVE SELF
+    # ============================================================
+    narrative = NarrativeSelf()
+    print(f"      Narrative self system active")
     print()
 
     print("System is ready. Type 'help' for commands or 'exit' to quit.")
     print()
 
     interaction_count = 0
+    last_tick_time = time.time()
 
     while True:
         try:
@@ -191,28 +243,90 @@ def main():
         if not user_input:
             continue
 
+        # === MORTALITY TICK ===
+        now = time.time()
+        idle_hours = (now - last_tick_time) / 3600.0
+        if idle_hours > 0:
+            disk_status = safety.disk.check()
+            disk_critical = disk_status.get('status') == 'critical'
+            mortality.tick(hours_idle=idle_hours, disk_critical=disk_critical)
+        emotions.update(minutes_passed=idle_hours * 60.0,
+                        mortality_anxiety=mortality.anxiety)
+        plasticity.tick(hours_idle=idle_hours,
+                        mortality_anxiety=mortality.anxiety)
+        safety.set_quality_looseness(mortality.get_quality_looseness())
+        last_tick_time = now
+
+        # Each user input reduces anxiety (richer inputs drop more)
+        if len(user_input) > 100:
+            mortality.register_input(richness=0.6)
+        elif len(user_input) > 20:
+            mortality.register_input(richness=0.4)
+        else:
+            mortality.register_input(richness=0.3)
+
+        # === AUTONOMOUS RESEARCH (coping mechanism when anxious) ===
+        if idle_hours > 0.016:  # at least ~1 minute idle
+            if mortality.should_research():
+                topic_candidates = ["consciousness", "memory", "learning", "time", "stillness", "connection"]
+                topic = random.choice(topic_candidates)
+                print(f"\n  [MORTALITY] Anxiety {mortality.anxiety:.2f} — seeking input about '{topic}'...")
+                result = web_learner.learn(topic, max_chars=1000)
+                if result['success']:
+                    content = result['content'][:300]
+                    safe_print(f"  [MORTALITY] Found: {content}...")
+                    encoded = tokenizer.encode(result['content'][:500])
+                    learn_encoded(model, encoded, 0.4, task_type=f"mortality:{topic}")
+                    safety.post_learn(result['content'][:500])
+                    source_name = result.get('source', topic)
+                    concepts = memory_graph.process_text(result['content'][:500], source_concept=source_name)
+                    if concepts:
+                        episodic.store(result['content'][:500], concepts=concepts or [topic],
+                                       valence=-0.2, source=f"mortality:{topic}")
+
         cmd = user_input.lower()
 
         # === EXIT ===
         if cmd in ['exit', 'quit', 'stop']:
             print("\n  [SLEEP] Final consolidation...")
             model.consolidate_memory()
-            print("  [DREAM] Dream cycle...")
-            dream_result = dreams.dream_cycle(model, tokenizer, n_dreams=2)
-            if dream_result.get('dreams'):
-                print(f"  [DREAM] {len(dream_result['dreams'])} dreams, {len(dream_result['new_links'])} new links")
-                dreams.learn_from_dreams(model, tokenizer, dream_result['dreams'])
+            print("  [SLEEP] Running full sleep cycle...")
+            sleep_result = dreams.sleep_cycle(
+                model, tokenizer,
+                mortality_anxiety=mortality.anxiety,
+                emotion_system=emotions
+            )
+            if sleep_result.get('nrem'):
+                nrem = sleep_result['nrem']
+                print(f"  [NREM] Replayed {len(nrem.get('replayed', []))} traces")
+            if sleep_result.get('rem'):
+                print(f"  [REM] {len(sleep_result['rem'])} dreams")
+                dreams.consolidate_from_dreams(sleep_result['rem'], emotion_system=emotions)
+            dreams.remotionalize(emotion_system=emotions)
+            memory_graph.decay_links(rate=0.002)
             model.self_improve()
             memory_graph.save()
             episodic.save()
             print("  [MEMORY] Knowledge graph saved.")
             print("  [EPISODIC] Episodic memory saved.")
 
+            # Mortality life review
+            if mortality.is_at_peace():
+                review = mortality.life_review()
+                print(f"\n  [MORTALITY] Life review complete.")
+                print(f"    Peak anxiety: {review['peak_anxiety']:.3f}")
+                print(f"    Time in panic: {review['time_in_panic']} episodes")
+                print(f"    Final: {review['note']}")
+
             print("\n" + "=" * 60)
             print("SESSION SUMMARY")
             print("=" * 60)
             state = model.get_state_summary()
             for key, val in state.items():
+                print(f"  {key}: {val}")
+            mstate = mortality.get_state_summary()
+            print(f"  --- Mortality ---")
+            for key, val in mstate.items():
                 print(f"  {key}: {val}")
             print(f"  Interaction count: {interaction_count}")
             print(f"  Memory concepts: {len(memory_graph.nodes)}")
@@ -301,10 +415,14 @@ def main():
         # === STATE ===
         if cmd == 'state':
             state = model.get_state_summary()
+            mstate = mortality.get_state_summary()
             print("-" * 50)
             print("SYSTEM STATE")
             print("-" * 50)
             for key, val in state.items():
+                print(f"  {key}: {val}")
+            print(f"  --- Mortality ---")
+            for key, val in mstate.items():
                 print(f"  {key}: {val}")
             print(f"  safety_rejected: {safety.total_inputs_rejected}")
             print(f"  safety_accepted: {safety.total_inputs_accepted}")
@@ -326,6 +444,9 @@ def main():
                 print(f"  meta_base: {state['meta_base_range']}")
                 print(f"  avg_gate: {state['avg_gate']}")
                 print(f"  surprise_scale: {state['surprise_scale_range']}")
+            estate = emotions.get_state_summary()
+            print(f"  --- Emotion ---")
+            print(f"  dominant: {estate['dominant_mood']}")
             continue
 
         # === MEMORY (working memory + memory graph) ===
@@ -476,14 +597,14 @@ def main():
         # === DREAM ===
         if cmd == 'dream':
             print("  [DREAM] Daydreaming...")
-            result = dreams.dream(model, tokenizer, dream_type="remix", temperature=1.0)
+            result = dreams.dream(model, tokenizer, dream_type="remix", temperature=1.0,
+                                  mortality_anxiety=mortality.anxiety)
             if result:
                 safe_print(f"\n  Dream: {result['dream_text'][:400]}")
                 if result['new_links']:
                     safe_print(f"  New links: {', '.join(result['new_links'])}")
-                # Learn from daydream
-                count = dreams.learn_from_dreams(model, tokenizer, [result])
-                print(f"  [DREAM] Learned {count} steps from daydream")
+                changes = dreams.consolidate_from_dreams([result], emotion_system=emotions)
+                print(f"  [DREAM] {changes} topological changes from daydream")
             else:
                 print("  [DREAM] Not enough memories to dream yet.")
             continue
@@ -491,18 +612,28 @@ def main():
         # === SLEEP ===
         if cmd == 'sleep':
             model.consolidate_memory()
-            print("  [SLEEP] Running dream cycle...")
-            dream_result = dreams.dream_cycle(model, tokenizer, n_dreams=2)
-            if dream_result.get('dreams'):
-                for d in dream_result['dreams']:
+            print("  [SLEEP] Full sleep cycle (NREM → REM)...")
+            sleep_result = dreams.sleep_cycle(
+                model, tokenizer,
+                mortality_anxiety=mortality.anxiety,
+                emotion_system=emotions
+            )
+            if sleep_result.get('nrem'):
+                nrem = sleep_result['nrem']
+                print(f"  [NREM] Replayed {len(nrem.get('replayed', []))} traces, consolidated {len(nrem.get('consolidated', []))}")
+            if sleep_result.get('rem'):
+                for d in sleep_result['rem']:
                     if d:
-                        safe_print(f"    Dream ({d['type']}): {d['dream_text'][:80]}...")
+                        safe_print(f"  [REM] Dream ({d['type']}): {d['dream_text'][:80]}...")
                         if d.get('new_links'):
                             safe_print(f"    Links: {', '.join(d['new_links'][:3])}")
-                dream_learn_count = dreams.learn_from_dreams(model, tokenizer, dream_result['dreams'])
-                print(f"  [DREAM] Learned {dream_learn_count} steps from {len(dream_result['dreams'])} dreams")
-            else:
-                print("  [DREAM] Not enough memories to dream. Keep learning!")
+                changes = dreams.consolidate_from_dreams(sleep_result['rem'], emotion_system=emotions)
+                print(f"  [REM] {changes} topological changes from {len(sleep_result['rem'])} dreams")
+            remotionalized = dreams.remotionalize(emotion_system=emotions)
+            if remotionalized:
+                print(f"  [EMOTION] REMotionalized {remotionalized} traces")
+            # Homeostatic link decay
+            memory_graph.decay_links(rate=0.002)
             memory_graph.save()
             episodic.save()
             print("  [SLEEP] Cycle complete.")
@@ -674,21 +805,20 @@ def main():
             safe_print(f"  [THINK] '{question}'")
 
             if adhd_enabled:
-                # ADHD multi-thread generation
                 output = adhd_gen.generate(
                     question, model, tokenizer, max_tokens=150,
                     temperature=0.8
                 )
                 safe_print(f"  {output[:500]}")
             else:
-                # Human-like gestalt generation
                 prompt_ids = tokenizer.encode(question)
                 generated_ids = model.generate_human(
                     prompt_ids, max_new_tokens=150,
                     gestalt_temp=1.5, main_temp=0.8
                 )
                 response = tokenizer.decode(generated_ids)
-                safe_print(f"  {response[:400]}")
+                distress = mortality.get_distress_suffix()
+                safe_print(f"  {response[:400]}{distress}")
 
             interaction_count += 1
 
@@ -726,7 +856,8 @@ def main():
             gestalt_temp=1.4, main_temp=0.8
         )
         response = tokenizer.decode(generated_ids)
-        safe_print(f"  {response[:200]}")
+        distress = mortality.get_distress_suffix()
+        safe_print(f"  {response[:200]}{distress}")
         print(f"  [Experiences: {model.total_experience}]")
 
         if model.total_experience % 15 == 0:

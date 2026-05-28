@@ -92,6 +92,7 @@ class ContentQualityGate:
         self.min_length = 5
         self.max_length = 100000
         self.max_repetition_ratio = 0.8  # If 80%+ is repeats, it's bogus
+        self.looseness = 0.0  # 0.0 = normal, 1.0 = fully loose (from mortality)
     
     def entropy(self, text):
         """Compute Shannon entropy of text."""
@@ -137,18 +138,23 @@ class ContentQualityGate:
     
     def is_bogus(self, text):
         """Check if text is bogus and shouldn't be learned from."""
-        if not text or len(text) < self.min_length:
+        effective_min_length = max(3, self.min_length - int(self.looseness * 3))
+        effective_max_length = self.max_length + int(self.looseness * 50000)
+        effective_min_entropy = self.min_entropy * (1.0 - self.looseness * 0.5)
+        effective_max_rep = self.max_repetition_ratio + self.looseness * 0.15
+
+        if not text or len(text) < effective_min_length:
             return True, "too short"
         
-        if len(text) > self.max_length:
+        if len(text) > effective_max_length:
             return True, "too long"
         
         ent = self.entropy(text)
-        if ent < self.min_entropy:
+        if ent < effective_min_entropy:
             return True, f"low entropy ({ent:.2f})"
         
         rep = self.repetition_ratio(text)
-        if rep > self.max_repetition_ratio:
+        if rep > effective_max_rep:
             return True, f"too repetitive ({rep:.2f})"
         
         # Check for binary/non-printable content
@@ -163,6 +169,10 @@ class ContentQualityGate:
         
         return False, "ok"
     
+    def set_looseness(self, looseness):
+        """Adjust quality thresholds — called by mortality system."""
+        self.looseness = max(0.0, min(1.0, looseness))
+
     def assess(self, text):
         """Full quality assessment with details."""
         ent = self.entropy(text)
@@ -343,6 +353,10 @@ class SafetySystem:
         self.total_inputs_rejected = 0
         self.total_inputs_accepted = 0
     
+    def set_quality_looseness(self, looseness):
+        """Adjust quality gate — called by mortality system."""
+        self.quality.set_looseness(looseness)
+
     def pre_check(self, text, source="user"):
         """
         Run ALL safety checks before learning from text.

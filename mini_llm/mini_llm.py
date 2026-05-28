@@ -136,35 +136,28 @@ class MiniLLM(nn.Module):
         
         return logits
     
-    def generate(self, start_string, predict_len, temperature=0.8):
+    def generate(self, start_string, predict_len, temperature=0.8, char_to_idx=None, idx_to_char=None):
         self.eval()
-        # Convert start string to indices
-        indices = [dataset.char_to_idx[c] for c in start_string]
+        if char_to_idx is None or idx_to_char is None:
+            raise ValueError("Must provide char_to_idx and idx_to_char mappings")
+        indices = [char_to_idx[c] for c in start_string]
         input_seq = torch.tensor(indices).unsqueeze(0).long()
         
         generated = []
         
         with torch.no_grad():
             for _ in range(predict_len):
-                # Get predictions
                 logits = self.forward(input_seq)
-                # Get last token predictions
                 logits = logits[:, -1, :] / temperature
-                # Apply softmax to get probabilities
                 probs = F.softmax(logits, dim=-1)
-                # Sample from distribution
                 idx_next = torch.multinomial(probs, num_samples=1)
                 
-                # Append predicted index
                 generated.append(idx_next.item())
-                # Update input sequence
                 input_seq = torch.cat((input_seq, idx_next), dim=1)
-                # Keep only last seq_length tokens
                 if input_seq.size(1) > self.seq_length:
                     input_seq = input_seq[:, -self.seq_length:]
         
-        # Convert indices back to characters
-        generated_chars = [dataset.idx_to_char[i] for i in generated]
+        generated_chars = [idx_to_char[i] for i in generated]
         return start_string + ''.join(generated_chars)
 
 # Step 6: Training function
@@ -179,7 +172,6 @@ def train_model(model, dataset, epochs=100, batch_size=32, learning_rate=0.003):
         for seq, target in dataloader:
             optimizer.zero_grad()
             logits = model(seq)
-            # Reshape for loss calculation
             loss = criterion(logits.view(-1, dataset.vocab_size), target.view(-1))
             loss.backward()
             optimizer.step()
@@ -187,9 +179,8 @@ def train_model(model, dataset, epochs=100, batch_size=32, learning_rate=0.003):
         
         if (epoch + 1) % 20 == 0:
             print(f'Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(dataloader):.4f}')
-            
-            # Generate sample text
-            sample_text = model.generate("Hello", 50, temperature=0.8)
+            sample_text = model.generate("The", 50, temperature=0.8,
+                char_to_idx=dataset.char_to_idx, idx_to_char=dataset.idx_to_char)
             print(f'Sample: "{sample_text}"\n')
 
 # Step 7: Main execution
@@ -245,6 +236,7 @@ if __name__ == "__main__":
     
     # Generate final samples
     print("\nFinal generation samples:")
-    for start in ["Hello", "We will", "text and"]:
-        generated = model.generate(start, 100, temperature=0.7)
+    for start in ["The", "to be", "All that"]:
+        generated = model.generate(start, 100, temperature=0.7,
+            char_to_idx=dataset.char_to_idx, idx_to_char=dataset.idx_to_char)
         print(f'Start: "{start}" -> Generated: "{generated}"')
