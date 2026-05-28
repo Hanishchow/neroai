@@ -122,7 +122,7 @@ def main():
     num_layers = 12 if is_gpu else 8
 
     model = create_model(
-        vocab_size=tokenizer.get_vocab_size(),
+        vocab_size=tokenizer.vocab_size,
         embed_dim=embed_dim,
         num_layers=num_layers,
         do_seed_learning=True,
