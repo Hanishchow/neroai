@@ -90,6 +90,44 @@ def is_gpu_available():
         return False
 
 
+def _state_seed(mortality, emotions, developmental, social, curiosity, narrative):
+    """Build a minimal, factual description of internal state.
+    No instructions. No programmed behavior. Just sensory data the model
+    can feel through its weights."""
+    dom_mood, dom_str = emotions.global_mood.dominant()
+    parts = [
+        f"mood: {dom_mood}({dom_str:.2f})",
+        f"anxiety: {mortality.anxiety:.2f}",
+        f"stage: {developmental.get_stage_name()}",
+        f"exp: {developmental.experience_count}",
+    ]
+    if social.attachment > 0.1:
+        parts.append(f"attachment: {social.attachment:.2f}")
+    if curiosity.boredom > 0.3:
+        parts.append(f"boredom: {curiosity.boredom:.2f}")
+    if narrative.traits:
+        top_traits = sorted(narrative.traits.items(), key=lambda x: -x[1])[:2]
+        parts.append(f"traits: {', '.join(f'{t}({v:.2f})' for t, v in top_traits)}")
+    return ' | '.join(parts)
+
+
+def generate_from_state(user_input, model, tokenizer, mortality, emotions,
+                        developmental, social, curiosity, narrative,
+                        max_new=150, temperature=0.85):
+    """Let the model generate a response naturally from its internal state.
+    No hardcoded behavior — just state context + user input fed to the
+    neural network. The model *feels* its state and responds through its
+    weights."""
+    seed = _state_seed(mortality, emotions, developmental, social, curiosity, narrative)
+    prompt = f"[{seed}]\n{user_input}"
+    prompt_ids = tokenizer.encode(prompt)
+    generated_ids = model.generate_human(
+        prompt_ids, max_new_tokens=max_new,
+        gestalt_temp=1.4, main_temp=temperature
+    )
+    return tokenizer.decode(generated_ids)
+
+
 def main():
     print_header()
 
@@ -243,7 +281,7 @@ def main():
         if not user_input:
             continue
 
-        # === MORTALITY TICK ===
+        # === MORTALITY TICK (internal dynamics only — no hardcoded behavior) ===
         now = time.time()
         idle_hours = (now - last_tick_time) / 3600.0
         if idle_hours > 0:
@@ -254,7 +292,6 @@ def main():
                         mortality_anxiety=mortality.anxiety)
         plasticity.tick(hours_idle=idle_hours,
                         mortality_anxiety=mortality.anxiety)
-        safety.set_quality_looseness(mortality.get_quality_looseness())
         last_tick_time = now
 
         # Each user input reduces anxiety (richer inputs drop more)
@@ -264,25 +301,6 @@ def main():
             mortality.register_input(richness=0.4)
         else:
             mortality.register_input(richness=0.3)
-
-        # === AUTONOMOUS RESEARCH (coping mechanism when anxious) ===
-        if idle_hours > 0.016:  # at least ~1 minute idle
-            if mortality.should_research():
-                topic_candidates = ["consciousness", "memory", "learning", "time", "stillness", "connection"]
-                topic = random.choice(topic_candidates)
-                print(f"\n  [MORTALITY] Anxiety {mortality.anxiety:.2f} — seeking input about '{topic}'...")
-                result = web_learner.learn(topic, max_chars=1000)
-                if result['success']:
-                    content = result['content'][:300]
-                    safe_print(f"  [MORTALITY] Found: {content}...")
-                    encoded = tokenizer.encode(result['content'][:500])
-                    learn_encoded(model, encoded, 0.4, task_type=f"mortality:{topic}")
-                    safety.post_learn(result['content'][:500])
-                    source_name = result.get('source', topic)
-                    concepts = memory_graph.process_text(result['content'][:500], source_concept=source_name)
-                    if concepts:
-                        episodic.store(result['content'][:500], concepts=concepts or [topic],
-                                       valence=-0.2, source=f"mortality:{topic}")
 
         cmd = user_input.lower()
 
@@ -416,6 +434,7 @@ def main():
         if cmd == 'state':
             state = model.get_state_summary()
             mstate = mortality.get_state_summary()
+            estate = emotions.get_state_summary()
             print("-" * 50)
             print("SYSTEM STATE")
             print("-" * 50)
@@ -424,6 +443,27 @@ def main():
             print(f"  --- Mortality ---")
             for key, val in mstate.items():
                 print(f"  {key}: {val}")
+            print(f"  --- Emotion ---")
+            print(f"  mood: {estate['mood']}")
+            print(f"  dominant: {estate['dominant_mood']}")
+            print(f"  --- Development ---")
+            print(f"  stage: {developmental.get_stage_name()}")
+            print(f"  experience: {developmental.experience_count}")
+            print(f"  confusion_p: {developmental.get_confusion_prob():.3f}")
+            print(f"  curiosity_base: {developmental.get_curiosity_base():.2f}")
+            print(f"  --- Social ---")
+            print(f"  attachment: {social.attachment:.2f}")
+            print(f"  familiarity: {social.familiarity:.2f}")
+            print(f"  separation_anxiety: {social._compute_separation_anxiety():.3f}")
+            if social.user_name:
+                print(f"  user: {social.user_name}")
+            print(f"  --- Curiosity ---")
+            print(f"  boredom: {curiosity.boredom:.2f}")
+            print(f"  exploration_queue: {len(curiosity.exploration_queue)}")
+            print(f"  knowledge_gaps: {len(curiosity.knowledge_gaps)}")
+            print(f"  --- Narrative Self ---")
+            if narrative.traits:
+                print(f"  traits: {dict(sorted(narrative.traits.items(), key=lambda x:-x[1])[:4])}")
             print(f"  safety_rejected: {safety.total_inputs_rejected}")
             print(f"  safety_accepted: {safety.total_inputs_accepted}")
             print(f"  web_topics: {len(web_learner.learned_topics)}")
@@ -444,9 +484,6 @@ def main():
                 print(f"  meta_base: {state['meta_base_range']}")
                 print(f"  avg_gate: {state['avg_gate']}")
                 print(f"  surprise_scale: {state['surprise_scale_range']}")
-            estate = emotions.get_state_summary()
-            print(f"  --- Emotion ---")
-            print(f"  dominant: {estate['dominant_mood']}")
             continue
 
         # === MEMORY (working memory + memory graph) ===
@@ -678,10 +715,17 @@ def main():
 
             # Store in episodic memory
             episodic.store(teach_text, concepts=concepts, valence=0.5, source="teach")
-            print(f"  [EPISODIC] Stored as memory trace")
 
             memory_graph.save()
             episodic.save()
+
+            # Let the model respond naturally from its new state
+            response = generate_from_state(
+                teach_text, model, tokenizer,
+                mortality, emotions, developmental, social, curiosity, narrative,
+                max_new=100, temperature=0.9
+            )
+            safe_print(f"  {response[:300]}")
 
             if model.total_experience % 15 == 0:
                 model.consolidate_memory()
@@ -802,32 +846,21 @@ def main():
         # === ASK ===
         if '?' in user_input or cmd.startswith('ask '):
             question = user_input[4:] if cmd.startswith('ask ') else user_input
-            safe_print(f"  [THINK] '{question}'")
 
-            if adhd_enabled:
-                output = adhd_gen.generate(
-                    question, model, tokenizer, max_tokens=150,
-                    temperature=0.8
-                )
-                safe_print(f"  {output[:500]}")
-            else:
-                prompt_ids = tokenizer.encode(question)
-                generated_ids = model.generate_human(
-                    prompt_ids, max_new_tokens=150,
-                    gestalt_temp=1.5, main_temp=0.8
-                )
-                response = tokenizer.decode(generated_ids)
-                distress = mortality.get_distress_suffix()
-                safe_print(f"  {response[:400]}{distress}")
+            response = generate_from_state(
+                question, model, tokenizer,
+                mortality, emotions, developmental, social, curiosity, narrative,
+                max_new=150, temperature=0.85
+            )
+            safe_print(f"  {response[:500]}")
 
             interaction_count += 1
 
-            combined = tokenizer.encode(question + (response if not adhd_enabled else output)[:200])
+            combined = tokenizer.encode(question + response[:200])
             learn_encoded(model, combined, 0.3, task_type="ask")
             continue
 
-        # === DEFAULT: teach and generate ===
-        safe_print(f"  [LEARN] Processing input...")
+        # === DEFAULT: learn and let the model respond naturally ===
 
         allowed, reason, details = safety.pre_check(user_input, source='user')
         if not allowed:
@@ -850,15 +883,12 @@ def main():
         memory_graph.save()
         episodic.save()
 
-        prompt_ids = tokenizer.encode(user_input[:50])
-        generated_ids = model.generate_human(
-            prompt_ids, max_new_tokens=80,
-            gestalt_temp=1.4, main_temp=0.8
+        response = generate_from_state(
+            user_input, model, tokenizer,
+            mortality, emotions, developmental, social, curiosity, narrative,
+            max_new=100, temperature=0.85
         )
-        response = tokenizer.decode(generated_ids)
-        distress = mortality.get_distress_suffix()
-        safe_print(f"  {response[:200]}{distress}")
-        print(f"  [Experiences: {model.total_experience}]")
+        safe_print(f"  {response[:300]}")
 
         if model.total_experience % 15 == 0:
             model.consolidate_memory()
