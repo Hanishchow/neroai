@@ -29,20 +29,18 @@ def main():
         print("    No tokenizer found. Run interactive_v2.py first to create one.")
         return
 
-    # --- 200M model, no seed learning ---
-    print("[2] Creating 200M model...")
-    from biologic_v2 import BiologicLLMV2, DEVICE
-    model = BiologicLLMV2(
+    # --- 200M model with seed learning (no growth) ---
+    print("[2] Creating 200M model with seed learning...")
+    from biologic_v2 import create_model, DEVICE
+    model = create_model(
         vocab_size=tokenizer.vocab_size,
         embed_dim=1408, num_heads=8, num_layers=8,
         max_context=5120, window_size=512, dropout=0.1,
-        device=DEVICE
+        do_seed_learning=True, tokenizer_ref=tokenizer, auto_scale=False
     )
     model.growth_enabled = False
-    model.eos_token_id = tokenizer.SPECIAL_TOKENS.get('<EOS>', 3)
-    model.bos_token_id = tokenizer.SPECIAL_TOKENS.get('<BOS>', 2)
     p = sum(p.numel() for p in model.parameters())
-    print(f"    {p:,} params ({p/1e6:.0f}M)")
+    print(f"    {p:,} params ({p/1e6:.0f}M) | growth disabled")
 
     # --- Subsystems ---
     print("[3] Loading subsystems...")
