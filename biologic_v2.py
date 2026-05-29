@@ -873,6 +873,7 @@ class BiologicLLMV2(nn.Module):
     def _grow(self):
         """Grow the model wider and deeper. Creates new parameters,
         copies old weights (top-left), initialises remainder with noise."""
+        old_params = self._param_count()
         old_dim = self.embed_dim
         old_layers = len(self.blocks)
         num_heads = self.num_heads
@@ -950,6 +951,13 @@ class BiologicLLMV2(nn.Module):
         print(f"  [GROWTH] New parameter count: {total:,}")
         target_msg = f"  [GROWTH] {total / self.target_params * 100:.1f}% toward {self.target_params:,} target" if total < self.target_params else "  [GROWTH] Target reached."
         print(target_msg)
+
+        # Notify growth awareness callback if set
+        if hasattr(self, 'growth_callback') and self.growth_callback is not None:
+            try:
+                self.growth_callback(old_params, total)
+            except:
+                pass
 
     def _check_growth(self):
         """Called during consolidate_memory. Triggers growth on plateau."""

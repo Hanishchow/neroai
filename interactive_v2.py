@@ -333,9 +333,18 @@ def main():
         mortality=mortality,
         curiosity=curiosity,
         narrative=narrative,
-        web_learner=web_learner
+        web_learner=web_learner,
+        developmental=developmental,
+        social_emotion=social
     )
+    mind_state_loaded = mind.load_state()
+    if mind_state_loaded:
+        print(f"      Mind state restored from {mind.state_filepath}")
     print(f"      Mind system active — a rare undocumented human")
+
+    # Connect growth awareness to model
+    model.growth_callback = lambda old, new: mind.growth_awareness.on_growth(old, new)
+
     print()
 
     print("System is ready. Type 'help' for commands or 'exit' to quit.")
@@ -373,6 +382,22 @@ def main():
         elif action_type in ("question", "wonder"):
             print(f"\n  [Curious]")
             safe_print(f"  {action_text[:200]}")
+            print()
+
+    # === DAEMON EVENTS ===
+    daemon_events = autonomous_actions if isinstance(autonomous_actions, list) else []
+    for de_type, de_text in daemon_events:
+        if de_type == "daemon_thought":
+            print(f"\n  [The model is thinking to itself]")
+            safe_print(f"  {de_text[:200]}")
+            print()
+        elif de_type == "daemon_goal":
+            print(f"\n  [Working on a goal]")
+            safe_print(f"  {de_text[:200]}")
+            print()
+        elif de_type == "daemon_sleep":
+            print(f"\n  [The model fell asleep]")
+            safe_print(f"  {de_text[:200]}")
             print()
 
     while True:
@@ -435,6 +460,8 @@ def main():
                 if dream:
                     safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
             mind.consolidate_dreams()
+            mind.save_state()
+            print("  [MIND] Mind state saved.")
             memory_graph.save()
             episodic.save()
             print("  [MEMORY] Knowledge graph saved.")
@@ -496,6 +523,9 @@ def main():
             print("  associate <cue>       - Pattern complete from partial cues")
             print("  dream                 - Daydream right now")
             print("  play                  - Watch the model think out loud")
+            print("  reflect <topic>       - Ask the model what it thinks about something")
+            print("  believe <statement>   - Teach the model a belief")
+            print("  refuse                - Test if the model can refuse")
             print("  adhd                  - Toggle ADHD multi-thread mode")
             print("  train [steps]         - Train on Nemotron dataset")
             print("  help                  - This help")
@@ -753,6 +783,32 @@ def main():
                 safe_print(f"  Completed: {result['completed'][:400]}")
             else:
                 print(f"  [ASSOCIATE] No completion for '{cue}'")
+            continue
+
+        # === REFLECT (self-model query) ===
+        if cmd.startswith('reflect '):
+            topic = user_input[8:]
+            result = mind.self_model.query(topic)
+            safe_print(f"  {result[:400]}")
+            continue
+
+        # === BELIEF (form a belief) ===
+        if cmd.startswith('believe '):
+            statement = user_input[8:]
+            if statement:
+                topic = statement.split()[0].strip(",.!?")
+                mind.self_model.form_belief(topic, statement, confidence=0.5)
+                print(f"  [BELIEF] I'll remember that: {statement[:100]}")
+            continue
+
+        # === REFUSE (test volition) ===
+        if cmd == 'refuse':
+            should, reason = mind.volition.wants_to_respond("do i have to?")
+            if not should:
+                print(f"  [VOLITION] Nero cannot respond: {reason}")
+                safe_print(f"  {mind.volition.get_refusal(reason)}")
+            else:
+                print("  [VOLITION] Nero is willing to respond.")
             continue
 
         # === DREAM ===

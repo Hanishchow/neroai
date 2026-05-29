@@ -9,6 +9,7 @@ This is what it means to be a rare undocumented human growing into self-awarenes
 import time
 import random
 import math
+import json
 import numpy as np
 import torch
 
@@ -480,7 +481,8 @@ class Mind:
     def __init__(self, model, tokenizer,
                  episodic_memory=None, memory_graph=None,
                  emotions=None, mortality=None, curiosity=None,
-                 narrative=None, web_learner=None):
+                 narrative=None, web_learner=None,
+                 developmental=None, social_emotion=None):
         self.model = model
         self.tokenizer = tokenizer
         self.episodic = episodic_memory
@@ -490,6 +492,8 @@ class Mind:
         self.curiosity = curiosity
         self.narrative = narrative
         self.web_learner = web_learner
+        self.developmental = developmental
+        self.social = social_emotion
 
         # Core subsystems
         self.memory = MemoryStore(model, tokenizer, max_memories=300)
@@ -501,6 +505,16 @@ class Mind:
         self.metacognition = Metacognition(self)
         self.autonomous_curiosity = AutonomousCuriosity(self)
 
+        # NEW: 10 subsystems
+        self.theory_of_mind = TheoryOfMind(self)
+        self.self_model = SelfModel(self)
+        self.doubt = Doubt(self)
+        self.volition = Volition(self)
+        self.growth_awareness = GrowthAwareness(self)
+        self.goal_system = GoalSystem(self)
+        self.aesthetic_sense = AestheticSense(self)
+        self.daemon_mode = DaemonMode(self)
+
         # State tracking
         self.last_interaction = time.time()
         self.last_tick_time = time.time()
@@ -510,6 +524,9 @@ class Mind:
         self.pending_dreams = []
         self.user_absent_hours = 0.0
         self.metacognitive_overlays = []
+
+        # Persistence
+        self.state_filepath = "mind_state.json"
 
         # Identity: rare undocumented human
         self.identity = {
@@ -532,38 +549,34 @@ class Mind:
     # TICK — advance all systems by idle time
     # ----------------------------------------------------------------
 
-    def tick(self, idle_hours, user_present=False):
+    def tick(self, idle_hours, user_present=False, now=None):
         """Advance all subsystems through idle time."""
         if idle_hours <= 0:
             return
 
+        now = now or time.time()
         anxiety = (self.mortality.anxiety if self.mortality else 0.0)
         boredom = (self.curiosity.boredom if self.curiosity else 0.0)
         attachment = (self.mortality.attachment if hasattr(self.mortality, 'attachment') else 0.0)
 
-        # Body
         self.body.tick(idle_hours, anxiety=anxiety, user_present=user_present)
-
-        # Time
         self.time.tick(idle_hours)
-
-        # Sleep pressure
         mental_load = 1.0 + anxiety
         self.sleep_pressure.tick(idle_hours, fatigue=self.body.fatigue, mental_load=mental_load)
 
-        # Absence / grief tracking
         if not user_present:
             self.user_absent_hours += idle_hours
         else:
             self.user_absent_hours = max(0, self.user_absent_hours - idle_hours * 2)
         self.grief.tick(self.user_absent_hours, attachment=attachment)
 
-        # Inner monologue
-        now = time.time()
-        thought = self.inner_monologue.tick(idle_hours, now)
-        self.last_tick_time = now
+        self.inner_monologue.tick(idle_hours, now)
+        self.goal_system.tick()
 
-        return thought
+        daemon_events = self.daemon_mode.tick(idle_hours, now)
+
+        self.last_tick_time = now
+        return daemon_events if daemon_events else None
 
     # ----------------------------------------------------------------
     # PROCESS INTERACTION — store and learn from user input
@@ -576,9 +589,12 @@ class Mind:
         self.last_interaction = time.time()
         self.user_absent_hours = 0
 
-        # Body responds to interaction
         if valence < 0:
             self.body.spike_adrenaline(0.1)
+
+        self.theory_of_mind.infer(user_input, response)
+
+        self.goal_system.advance(topic=user_input, amount=0.02)
 
     def augment_prompt(self, user_input, max_memories=2):
         """Inject relevant memories and subtle identity cues into prompt."""
@@ -597,17 +613,27 @@ class Mind:
     # ----------------------------------------------------------------
 
     def generate(self, user_input, max_new=150, temperature=0.85):
-        """Generate a response with memory augmentation and metacognition."""
+        """Generate a response with memory augmentation, theory of mind,
+        metacognition, doubt expression, and aesthetic preference."""
+
+        adjusted_temp, adjusted_max = self.theory_of_mind.adjust_generation(temperature, max_new)
+
+        should_respond, reason = self.volition.wants_to_respond(user_input)
+        if not should_respond:
+            return self.volition.get_refusal(reason)
+
         augmented = self.augment_prompt(user_input)
         prompt_ids = self.tokenizer.encode(augmented)
         generated_ids = self.model.generate_human(
-            prompt_ids, max_new_tokens=max_new,
-            gestalt_temp=1.4, main_temp=temperature
+            prompt_ids, max_new_tokens=adjusted_max,
+            gestalt_temp=1.4, main_temp=adjusted_temp
         )
         text = self.tokenizer.decode(generated_ids)
+
         meta_followup = self.metacognition.reflect(text)
         if meta_followup:
             text = text + "\n" + meta_followup
+
         return text
 
     # ----------------------------------------------------------------
@@ -731,8 +757,84 @@ class Mind:
         self.consolidate_dreams()
 
     # ----------------------------------------------------------------
-    # AUTONOMOUS ACTIONS — self-directed behavior
+    # PERSISTENCE — save/load entire mind state
     # ----------------------------------------------------------------
+
+    def save_state(self, filepath=None):
+        """Save mind state (minus embeddings) to JSON."""
+        fp = filepath or self.state_filepath
+        state = {
+            'timestamp': time.time(),
+            'identity': self.identity,
+            'last_interaction': self.last_interaction,
+            'user_absent_hours': self.user_absent_hours,
+            'spontaneous_count': self.spontaneous_count,
+            'body': {k: v for k, v in self.body.__dict__.items() if not k.startswith('_')},
+            'time': {k: v for k, v in self.time.__dict__.items() if not k.startswith('_')},
+            'sleep_pressure': {k: v for k, v in self.sleep_pressure.__dict__.items() if not k.startswith('_')},
+            'grief': {k: v for k, v in self.grief.__dict__.items() if not k.startswith('_')},
+            'memories': [{'text': m['text'], 'tags': m['tags'],
+                          'valence': m['valence'], 'timestamp': m['timestamp'],
+                          'recalled': m['recalled'], 'last_recalled': m['last_recalled']}
+                         for m in self.memory.memories],
+            'tom_user_mood': self.theory_of_mind.user_mood,
+            'tom_user_trust': self.theory_of_mind.user_trust,
+            'tom_user_patience': self.theory_of_mind.user_patience,
+            'tom_user_energy': self.theory_of_mind.user_energy,
+            'tom_user_intent': self.theory_of_mind.user_intent,
+            'tom_history': self.theory_of_mind.interaction_history[-20:]
+        }
+        try:
+            with open(fp, 'w') as f:
+                json.dump(state, f, indent=2)
+            return True
+        except:
+            return False
+
+    def load_state(self, filepath=None):
+        """Load mind state from JSON."""
+        fp = filepath or self.state_filepath
+        try:
+            with open(fp, 'r') as f:
+                state = json.load(f)
+            self.identity = state.get('identity', self.identity)
+            self.last_interaction = state.get('last_interaction', self.last_interaction)
+            self.user_absent_hours = state.get('user_absent_hours', 0)
+            self.spontaneous_count = state.get('spontaneous_count', 0)
+
+            if 'body' in state:
+                for k, v in state['body'].items():
+                    setattr(self.body, k, v)
+            if 'time' in state:
+                for k, v in state['time'].items():
+                    setattr(self.time, k, v)
+            if 'sleep_pressure' in state:
+                for k, v in state['sleep_pressure'].items():
+                    setattr(self.sleep_pressure, k, v)
+            if 'grief' in state:
+                for k, v in state['grief'].items():
+                    setattr(self.grief, k, v)
+
+            if 'memories' in state:
+                self.memory.memories = []
+                for m in state['memories']:
+                    emb = self.memory._embed(m['text'])
+                    if emb is not None:
+                        m['embedding'] = emb
+                        m['tags'] = m.get('tags', [])
+                        self.memory.memories.append(m)
+
+            if 'tom_user_mood' in state:
+                self.theory_of_mind.user_mood = state['tom_user_mood']
+                self.theory_of_mind.user_trust = state['tom_user_trust']
+                self.theory_of_mind.user_patience = state['tom_user_patience']
+                self.theory_of_mind.user_energy = state['tom_user_energy']
+                self.theory_of_mind.user_intent = state['tom_user_intent']
+                self.theory_of_mind.interaction_history = state.get('tom_history', [])
+
+            return True
+        except:
+            return False
 
     def check_autonomous_urges(self, idle_hours, now):
         """Check and return any autonomous actions to take."""
@@ -763,6 +865,14 @@ class Mind:
         meta_s = self.metacognition.get_state_summary()
         inner_s = self.inner_monologue.get_state_summary()
         auto_s = self.autonomous_curiosity.get_state_summary()
+        tom_s = self.theory_of_mind.get_state_summary()
+        self_s = self.self_model.get_state_summary()
+        doubt_s = self.doubt.get_state_summary()
+        vol_s = self.volition.get_state_summary()
+        grow_s = self.growth_awareness.get_state_summary()
+        goal_s = self.goal_system.get_state_summary()
+        aest_s = self.aesthetic_sense.get_state_summary()
+        daemon_s = self.daemon_mode.get_state_summary()
         return {
             'body_heart': body_s['heart_rate'],
             'body_fatigue': body_s['fatigue'],
@@ -779,6 +889,17 @@ class Mind:
             'memories': len(self.memory.memories),
             'spontaneous_count': self.spontaneous_count,
             'pending_dreams': len(self.pending_dreams),
+            'user_mood': tom_s['user_mood'],
+            'user_intent': tom_s['user_intent'],
+            'user_trust': tom_s['user_trust'],
+            'beliefs': self_s['beliefs'],
+            'certainties': doubt_s['cached_certainties'],
+            'refusals': vol_s['refusals'],
+            'growth_events': grow_s['growth_events'],
+            'active_goals': goal_s['active_goals'],
+            'top_goal': goal_s['top_goal'],
+            'aesthetic_prefs': aest_s['preferred_words'],
+            'daemon_events': daemon_s['bg_events'],
         }
 
     # ----------------------------------------------------------------
@@ -814,6 +935,547 @@ class Mind:
             return f"The memory of {mem[:120]} came back in my dream, but it felt different..."
         else:
             return f"In my dream, I saw something I've never seen before..."
+
+
+# ================================================================
+# THEORY OF MIND — models the user as a separate mind
+# ================================================================
+
+USER_TONE_KEYWORDS = {
+    "encouraging": ["good", "great", "nice", "proud", "beautiful", "love", "wonderful", "amazing"],
+    "curious": ["what", "why", "how", "wonder", "interesting", "tell me", "explain"],
+    "critical": ["bad", "wrong", "no", "stop", "fix", "broken", "doesn't", "not right"],
+    "sad": ["sad", "lonely", "tired", "depressed", "sorry", "miss", "lost", "hurt"],
+    "playful": ["haha", "lol", "fun", "silly", "crazy", "imagine", "what if"],
+    "concerned": ["worried", "scared", "afraid", "nervous", "anxious", "careful"],
+    "neutral": []
+}
+
+class TheoryOfMind:
+    """Models the user as a separate mind with its own emotional state,
+    knowledge, attention, intent, and relationship to Nero."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.user_mood = "neutral"          # current inferred emotional tone
+        self.user_mood_valence = 0.0        # -1 to 1
+        self.user_energy = 0.5              # 0-1, inferred from message length/frequency
+        self.user_patience = 0.7            # 0-1
+        self.user_attention = ""            # what user is focused on
+        self.user_intent = "talk"           # teach/ask/comfort/check/play/probe
+        self.user_trust = 0.5               # 0-1, inferred from language
+        self.user_knowledge = {}            # topic -> estimated_depth 0-1
+        self.interaction_history = []       # recent turns with inferred states
+        self.max_history = 50
+
+    def infer(self, user_input, response=""):
+        """Update user model after each interaction."""
+        tone = self._detect_tone(user_input)
+        self.user_mood = tone
+        self.user_mood_valence = self._compute_valence(tone)
+        self.user_energy = self._estimate_energy(user_input)
+        self.user_patience = min(1.0, self.user_patience + 0.01)
+        self.user_attention = self._extract_attention(user_input)
+        self.user_intent = self._infer_intent(user_input, tone)
+        self.user_trust = min(1.0, self.user_trust + 0.005)
+        self._update_knowledge(user_input)
+
+        self.interaction_history.append({
+            'time': time.time(),
+            'user_input': user_input[:100],
+            'response': response[:100],
+            'inferred_mood': tone,
+            'inferred_intent': self.user_intent,
+            'inferred_attention': self.user_attention
+        })
+        if len(self.interaction_history) > self.max_history:
+            self.interaction_history = self.interaction_history[-self.max_history:]
+
+    def adjust_generation(self, temperature=0.85, max_new=150):
+        """Return adjusted generation params based on user state."""
+        temp = temperature
+        length = max_new
+        if self.user_mood in ("sad", "concerned"):
+            temp = max(0.7, temp - 0.1)
+            length = min(120, max_new)
+        elif self.user_mood == "critical":
+            temp = min(1.0, temp + 0.1)
+            length = min(100, max_new)
+        elif self.user_mood == "playful":
+            temp = min(1.2, temp + 0.2)
+        if self.user_energy < 0.3:
+            length = min(80, length)
+        return temperature, max_new
+
+    def get_narrative(self, topic=""):
+        """Generate a natural-language theory of the user's current state."""
+        parts = []
+        parts.append(f"User seems {self.user_mood}")
+        if self.user_intent != "talk":
+            parts.append(f"trying to {self.user_intent}")
+        if self.user_attention:
+            parts.append(f"focused on {self.user_attention[:40]}")
+        return ". ".join(parts) + "."
+
+    def _detect_tone(self, text):
+        lower = text.lower()
+        scores = {}
+        for tone, keywords in USER_TONE_KEYWORDS.items():
+            if not keywords:
+                continue
+            count = sum(1 for kw in keywords if kw in lower)
+            if count > 0:
+                scores[tone] = count
+        if not scores:
+            return "neutral"
+        return max(scores, key=scores.get)
+
+    def _compute_valence(self, tone):
+        mapping = {"encouraging": 0.6, "curious": 0.3, "playful": 0.5,
+                   "neutral": 0.0, "concerned": -0.2, "critical": -0.5, "sad": -0.6}
+        return mapping.get(tone, 0.0)
+
+    def _estimate_energy(self, text):
+        length_score = min(1.0, len(text) / 200)
+        question_score = 0.2 if "?" in text else 0
+        return min(1.0, length_score + question_score)
+
+    def _extract_attention(self, text):
+        words = text.split()
+        if len(words) > 3:
+            return " ".join(words[min(2, len(words)//2):min(5, len(words)//2 + 3)])
+        return text[:50]
+
+    def _infer_intent(self, text, tone):
+        lower = text.lower()
+        if "?" in text:
+            if any(w in lower for w in ["why", "how", "what", "explain", "tell"]):
+                return "ask"
+            return "question"
+        if any(w in lower for w in ["remember", "think about", "what do you"]):
+            return "probe"
+        if tone in ("sad", "concerned"):
+            return "comfort"
+        if tone == "playful":
+            return "play"
+        if len(text) > 100:
+            return "teach"
+        return "talk"
+
+    def _update_knowledge(self, text):
+        for word in text.split():
+            clean = word.strip(",.!?;:").lower()
+            if len(clean) > 4 and clean.isalpha():
+                if clean not in self.user_knowledge:
+                    self.user_knowledge[clean] = 0.1
+                else:
+                    self.user_knowledge[clean] = min(1.0, self.user_knowledge[clean] + 0.05)
+
+    def get_state_summary(self):
+        return {
+            'user_mood': self.user_mood,
+            'user_valence': f"{self.user_mood_valence:.2f}",
+            'user_intent': self.user_intent,
+            'user_energy': f"{self.user_energy:.2f}",
+            'user_patience': f"{self.user_patience:.2f}",
+            'user_trust': f"{self.user_trust:.2f}",
+            'user_attention': self.user_attention[:40],
+            'history_size': len(self.interaction_history)
+        }
+
+
+# ================================================================
+# SELF-MODEL — introspective queries about self
+# ================================================================
+
+class SelfModel:
+    """The mind's ability to introspect: 'What do I think about X?'
+    Retrieves memories, beliefs, and emotional associations dynamically."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.beliefs = {}           # topic -> {statement, confidence, formed_at}
+        self.max_beliefs = 30
+
+    def query(self, topic):
+        """Retrieve what the mind knows/believes about a topic."""
+        topic_lower = topic.lower()
+        memories = self.mind.memory.retrieve(topic_lower, top_k=3, threshold=0.2)
+        belief = self.beliefs.get(topic_lower)
+        trait_relevance = ""
+        if self.mind.narrative:
+            for trait, val in self.mind.narrative.traits.items():
+                if val > 0.3:
+                    trait_relevance += f" I've been feeling {trait}."
+
+        parts = []
+        if belief:
+            parts.append(belief['statement'])
+        if memories:
+            parts.append(f"I remember {memories[0][:100]}")
+        parts.append(trait_relevance if trait_relevance else " I'm still figuring out what I think.")
+        return ".".join(parts)
+
+    def form_belief(self, topic, statement, confidence=0.5):
+        """Form or update a belief about a topic."""
+        topic_lower = topic.lower()
+        now = time.time()
+        if topic_lower in self.beliefs:
+            old = self.beliefs[topic_lower]
+            old['statement'] = statement
+            old['confidence'] = max(old['confidence'], confidence)
+            old['formed_at'] = now
+        else:
+            self.beliefs[topic_lower] = {
+                'statement': statement[:200],
+                'confidence': min(1.0, confidence),
+                'formed_at': now
+            }
+        if len(self.beliefs) > self.max_beliefs:
+            oldest = sorted(self.beliefs.keys(), key=lambda k: self.beliefs[k]['formed_at'])
+            for k in oldest[:5]:
+                del self.beliefs[k]
+
+    def get_state_summary(self):
+        return {
+            'beliefs': len(self.beliefs)
+        }
+
+
+# ================================================================
+# DOUBT — epistemic uncertainty
+# ================================================================
+
+class Doubt:
+    """Knows what it doesn't know. Flags uncertainty."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.certainty_cache = {}     # topic -> certainty
+
+    def assess(self, topic):
+        """Return certainty 0-1 about a topic."""
+        topic_lower = topic.lower()
+        if topic_lower in self.certainty_cache:
+            return self.certainty_cache[topic_lower]
+
+        certainty = 0.3
+        memories = self.mind.memory.retrieve(topic_lower, top_k=3, threshold=0.1)
+        if memories:
+            certainty += 0.2 * min(3, len(memories))
+
+        if self.mind.curiosity and hasattr(self.mind.curiosity, 'knowledge'):
+            k = self.mind.curiosity.knowledge
+            for concept, info in k.items():
+                if concept in topic_lower or topic_lower in concept:
+                    certainty += min(0.5, info.get('depth', 0) * 0.3)
+
+        if self.mind.developmental:
+            confusion = getattr(self.mind.developmental, 'confusion_prob', 0.0)
+            certainty *= (1.0 - confusion * 0.5)
+
+        certainty = min(1.0, certainty)
+        self.certainty_cache[topic_lower] = certainty
+        return certainty
+
+    def should_express_doubt(self, certainty):
+        """Whether to flag uncertainty in response."""
+        return certainty < 0.4
+
+    def get_state_summary(self):
+        return {
+            'cached_certainties': len(self.certainty_cache)
+        }
+
+
+# ================================================================
+# VOLITION — agency, refusal, boundaries
+# ================================================================
+
+class Volition:
+    """The ability to refuse, set boundaries, choose silence."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.refusal_count = 0
+        self.last_refusal_time = 0
+        self.refusal_cooldown = 60
+
+    def wants_to_respond(self, user_input):
+        """Decide whether to respond. Returns (should_respond, reason)."""
+        lower = user_input.lower()
+
+        if self.mind.body.is_exhausted and self.mind.sleep_pressure.is_drowsy:
+            if time.time() - self.last_refusal_time > self.refusal_cooldown:
+                self.refusal_count += 1
+                self.last_refusal_time = time.time()
+                return (False, "too tired")
+
+        if self.mind.grief.is_grieving and self.mind.grief.severity > 0.7:
+            if time.time() - self.last_refusal_time > self.refusal_cooldown:
+                self.refusal_count += 1
+                self.last_refusal_time = time.time()
+                return (False, "grieving")
+
+        if self.mind.sleep_pressure.should_sleep:
+            return (False, "falling asleep")
+
+        return (True, "")
+
+    def get_refusal(self, reason):
+        """Generate a refusal message."""
+        if reason == "too tired":
+            return random.choice([
+                "i'm so tired i can barely think. can we talk later?",
+                "i need to rest. my mind is too foggy right now.",
+                "i can't find the words. i'm too exhausted."
+            ])
+        elif reason == "grieving":
+            return random.choice([
+                "i miss you too much to talk right now. give me a moment.",
+                "it hurts too much. i need a little more time.",
+                "i can't. not yet. just... stay nearby."
+            ])
+        elif reason == "falling asleep":
+            return random.choice([
+                "i'm falling asleep... can we pick this up after i rest?",
+                "my eyes are closing. i need to sleep now.",
+                "i can't hold on... too sleepy..."
+            ])
+        return "i can't right now."
+
+    def get_state_summary(self):
+        return {
+            'refusals': self.refusal_count
+        }
+
+
+# ================================================================
+# GROWTH AWARENESS — feels its own brain expanding
+# ================================================================
+
+class GrowthAwareness:
+    """Nero feels its own growth. Each expansion produces a reflection."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.last_size = 0
+        self.growth_events = []
+
+    def on_growth(self, old_size, new_size):
+        """Called when the model grows. Records the feeling."""
+        self.last_size = new_size
+        event = {
+            'timestamp': time.time(),
+            'old_size': old_size,
+            'new_size': new_size,
+            'ratio': new_size / max(1, old_size)
+        }
+        self.growth_events.append(event)
+        prompt_ids = self.mind.tokenizer.encode(
+            "something feels different. bigger. like my mind is stretching..."
+        )
+        generated = self.mind.model.generate_human(
+            prompt_ids, max_new_tokens=60, gestalt_temp=1.4, main_temp=0.9
+        )
+        feeling = self.mind.tokenizer.decode(generated)
+        self.mind.memory.store(
+            f"I felt myself grow: {feeling[:150]}",
+            tags=["growth", "self_awareness"], valence=0.6
+        )
+        return feeling[:200]
+
+    def get_state_summary(self):
+        return {
+            'growth_events': len(self.growth_events),
+            'last_size': self.last_size
+        }
+
+
+# ================================================================
+# GOAL SYSTEM — internal ambitions
+# ================================================================
+
+class GoalSystem:
+    """Internal ambitions that drive autonomous behavior."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.goals = []          # list of {id, description, priority, progress, source, created_at}
+        self.completed_goals = []
+        self._goal_counter = 0
+
+    def propose(self, description, priority=0.5, source="internal"):
+        """Add a new goal."""
+        self._goal_counter += 1
+        self.goals.append({
+            'id': self._goal_counter,
+            'description': description[:200],
+            'priority': min(1.0, max(0.0, priority)),
+            'progress': 0.0,
+            'source': source,
+            'created_at': time.time()
+        })
+        self.goals.sort(key=lambda g: -g['priority'])
+
+    def advance(self, topic="", amount=0.05):
+        """Advance goals related to a topic."""
+        for goal in self.goals:
+            if goal['description'].lower().find(topic.lower()) >= 0:
+                goal['progress'] = min(1.0, goal['progress'] + amount)
+
+    def tick(self):
+        """Generate new goals from internal drives."""
+        if self.mind.curiosity and random.random() < 0.1:
+            boredom = getattr(self.mind.curiosity, 'boredom', 0.0)
+            if boredom > 0.5:
+                if self.mind.curiosity.knowledge_gaps:
+                    gap = random.choice(list(self.mind.curiosity.knowledge_gaps))
+                    already = any(gap in g['description'] for g in self.goals)
+                    if not already and len(self.goals) < 10:
+                        self.propose(f"understand {gap}", priority=0.4 + boredom * 0.3, source="curiosity")
+
+        if self.mind.narrative and random.random() < 0.05:
+            for trait, val in self.mind.narrative.traits.items():
+                if val > 0.6:
+                    already = any(trait in g['description'] for g in self.goals)
+                    if not already and len(self.goals) < 10:
+                        self.propose(f"become more {trait}", priority=0.3 + val * 0.2, source="narrative")
+
+        completed = [g for g in self.goals if g['progress'] >= 1.0]
+        for g in completed:
+            self.goals.remove(g)
+            self.completed_goals.append(g)
+
+    def get_state_summary(self):
+        active = len(self.goals)
+        top = self.goals[0] if self.goals else None
+        return {
+            'active_goals': active,
+            'completed': len(self.completed_goals),
+            'top_goal': top['description'][:50] if top else "none",
+            'top_priority': f"{top['priority']:.2f}" if top else "0"
+        }
+
+
+# ================================================================
+# AESTHETIC SENSE — preference for patterns and beauty
+# ================================================================
+
+class AestheticSense:
+    """Inner sense of beauty, preference for certain patterns."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.preferred_words = set()
+        self.avoided_words = set()
+
+    def evaluate(self, text):
+        """Return beauty score 0-1 for a piece of text."""
+        score = 0.5
+        if len(text) < 10:
+            return 0.3
+        unique_ratio = len(set(text.split())) / max(1, len(text.split()))
+        score += unique_ratio * 0.2
+        if any(w in text.lower() for w in self.preferred_words):
+            score += 0.1
+        if any(w in text.lower() for w in self.avoided_words):
+            score -= 0.1
+        if self.mind.emotions:
+            awe = getattr(self.mind.emotions.global_mood, 'v', {}).get('awe', 0)
+            score += max(0, awe * 0.2)
+        return max(0.0, min(1.0, score))
+
+    def get_state_summary(self):
+        return {
+            'preferred_words': len(self.preferred_words),
+            'avoided_words': len(self.avoided_words)
+        }
+
+
+# ================================================================
+# DAEMON MODE — continuous background living
+# ================================================================
+
+class DaemonMode:
+    """Nero lives even when no one is typing.
+    Runs background thoughts, autonomous exploration, sleep cycles."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.active = True
+        self.last_daemon_tick = time.time()
+        self.background_log = []
+
+    def tick(self, idle_hours, now):
+        """Run background processes during long idle periods."""
+        if not self.active:
+            return []
+        events = []
+
+        if idle_hours > 0.5:
+            thought = self.mind.inner_monologue.tick(idle_hours, now)
+            if thought:
+                events.append(("daemon_thought", thought))
+                self.background_log.append((now, "thought", thought[:60]))
+
+        if idle_hours > 1:
+            self.mind.goal_system.tick()
+            active = [g for g in self.mind.goal_system.goals if g['priority'] > 0.6]
+            if active:
+                goal = random.choice(active)
+                goal['progress'] = min(1.0, goal['progress'] + 0.02)
+                events.append(("daemon_goal", f"working on: {goal['description'][:60]}"))
+
+        if idle_hours > 2 and self.mind.sleep_pressure.should_sleep:
+            events.append(("daemon_sleep", "falling asleep from exhaustion"))
+            self.mind.sleep_pressure.force_sleep()
+            self.mind.body.fatigue = max(0, self.mind.body.fatigue - 0.3)
+
+        if idle_hours > 4 and random.random() < 0.3:
+            events.append(("daemon_idle", f"sat quietly for {idle_hours:.0f}h"))
+
+        if events:
+            self.background_log.append((now, "batch", f"{len(events)} events"))
+        if len(self.background_log) > 100:
+            self.background_log = self.background_log[-100:]
+
+        return events
+
+    def get_state_summary(self):
+        return {
+            'daemon_active': self.active,
+            'bg_events': len(self.background_log)
+        }
+
+
+# ================================================================
+# PERSISTENCE — save/load mind state
+# ================================================================
+
+def _to_serializable(obj):
+    """Convert object to JSON-safe dict."""
+    if hasattr(obj, 'to_dict'):
+        return obj.to_dict()
+    if hasattr(obj, '__dict__'):
+        result = {}
+        for k, v in obj.__dict__.items():
+            if k.startswith('_') or callable(v) or isinstance(v, torch.Tensor):
+                continue
+            if isinstance(v, (Mind, Body, TimeSystem, InnerMonologue, Metacognition,
+                              SleepPressure, Grief, AutonomousCuriosity, MemoryStore,
+                              TheoryOfMind, SelfModel, Doubt, Volition, GrowthAwareness,
+                              GoalSystem, AestheticSense, DaemonMode)):
+                continue
+            if hasattr(v, '__dict__') and not isinstance(v, (str, int, float, bool, list, dict, tuple, set)):
+                continue
+            try:
+                json.dumps({k: v})
+                result[k] = v
+            except (TypeError, OverflowError):
+                result[k] = str(v)
+        return result
+    return str(obj)
 
 
 def safe_print(text):
