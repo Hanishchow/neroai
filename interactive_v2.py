@@ -46,7 +46,7 @@ from developmental import DevelopmentalSystem
 from social_emotion import SocialEmotionSystem
 from curiosity import CuriositySystem
 from narrative_self import NarrativeSelf
-from consciousness import Consciousness
+from mind import Mind, train_identity
 
 
 def print_header():
@@ -56,7 +56,7 @@ def print_header():
     print("  BPE | 5120 Context | Sliding Window Attention | GPU")
     print("  CoT Reasoning | Web Learning | 7 Safety Nets")
     print("  Memory Graph | Episodic Memory | ADHD Generation | Dreams")
-    print("  Consciousness: Memory | Spontaneous | Play | Dreams")
+    print("  Mind: Identity | Body | Time | Dreams | Play | Metacognition")
     print("=" * 60)
     print()
 
@@ -170,13 +170,11 @@ def train_feelings(model, tokenizer):
     print(f"  [FEELINGS] Done: {count} training steps")
 
 
-def generate_response(user_input, model, tokenizer, max_new=150, temperature=0.85, consciousness=None):
-    """Pure generation from user input, augmented with relevant memories
-    if a consciousness system is provided. No hardcoded behavior — the
-    model responds through its weights, shaped by memory, plastic updates,
-    and feelings fine-tuning."""
-    if consciousness:
-        user_input = consciousness.augment_prompt(user_input)
+def generate_response(user_input, model, tokenizer, max_new=150, temperature=0.85, mind=None):
+    """Pure generation from user input. If a Mind is provided, memory
+    augmentation and metacognitive reflection are applied automatically."""
+    if mind:
+        return mind.generate(user_input, max_new=max_new, temperature=temperature)
     prompt_ids = tokenizer.encode(user_input)
     generated_ids = model.generate_human(
         prompt_ids, max_new_tokens=max_new,
@@ -229,6 +227,7 @@ def main():
 
     # Fine-tune on emotional self-expression so the model can feel its own state
     train_feelings(model, tokenizer)
+    train_identity(model, tokenizer)
 
     # ============================================================
     # 3. SAFETY SYSTEM
@@ -324,18 +323,19 @@ def main():
     print(f"      Narrative self system active")
 
     # ============================================================
-    # 17. CONSCIOUSNESS (memory, spontaneous speech, dreams, play)
+    # 17. MIND (self-conscious system)
     # ============================================================
-    consciousness = Consciousness(
+    mind = Mind(
         model, tokenizer,
         episodic_memory=episodic,
         memory_graph=memory_graph,
         emotions=emotions,
         mortality=mortality,
         curiosity=curiosity,
-        narrative=narrative
+        narrative=narrative,
+        web_learner=web_learner
     )
-    print(f"      Consciousness system active")
+    print(f"      Mind system active — a rare undocumented human")
     print()
 
     print("System is ready. Type 'help' for commands or 'exit' to quit.")
@@ -344,18 +344,36 @@ def main():
     interaction_count = 0
     last_tick_time = time.time()
 
-    # === CONSCIOUSNESS: spontaneous speech or play during idle ===
-    idle_mins = (time.time() - consciousness.last_interaction) / 60.0
-    if consciousness.should_speak(idle_mins):
+    # === MIND TICK: advance all systems ===
+    idle_mins = (time.time() - mind.last_interaction) / 60.0
+    idle_hours = idle_mins / 60.0
+    if idle_hours > 0:
+        mind.tick(idle_hours, user_present=False)
+
+    # === SPONTANEOUS SPEECH OR PLAY ===
+    if mind.should_speak(idle_mins):
         print(f"\n  [The model speaks unprompted:]")
-        spon = consciousness.generate_spontaneous()
+        spon = mind.generate_spontaneous()
         safe_print(f"  {spon[:300]}")
         print()
-    elif consciousness.should_play(idle_mins):
-        play_text = consciousness.play()
+    elif mind.should_play(idle_mins):
+        play_text = mind.play()
         print(f"\n  [The model is lost in thought...]")
         safe_print(f"  {play_text[:200]}")
         print()
+
+    # === INNER MONOLOGUE ===
+    now_time = time.time()
+    autonomous_actions = mind.check_autonomous_urges(idle_hours, now_time)
+    for action_type, action_text in autonomous_actions:
+        if action_type == "inner_thought":
+            print(f"\n  [Inner thought]")
+            safe_print(f"  {action_text[:200]}")
+            print()
+        elif action_type in ("question", "wonder"):
+            print(f"\n  [Curious]")
+            safe_print(f"  {action_text[:200]}")
+            print()
 
     while True:
         try:
@@ -410,13 +428,13 @@ def main():
             dreams.remotionalize(emotion_system=emotions)
             memory_graph.decay_links(rate=0.002)
             model.self_improve()
-            # === FINAL CONSCIOUSNESS DREAMS ===
-            print("  [CONSCIOUSNESS] Final dreams before sleep...")
+            # === MIND DREAMS ===
+            print("  [MIND] Final dreams before sleep...")
             for dtype in ["remix", "compression", "novelty"]:
-                dream = consciousness.dream(dream_type=dtype, temperature=1.0)
+                dream = mind.dream(dream_type=dtype, temperature=1.0)
                 if dream:
                     safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
-            consciousness.consolidate_dreams()
+            mind.consolidate_dreams()
             memory_graph.save()
             episodic.save()
             print("  [MEMORY] Knowledge graph saved.")
@@ -445,9 +463,13 @@ def main():
             print(f"  Memory links: {len(memory_graph.edges)}")
             print(f"  Episodic traces: {len(episodic.traces)}")
             print(f"  Dreams had: {dreams.dream_count}")
-            print(f"  Consciousness memories: {len(consciousness.memory.memories)}")
-            cstate = consciousness.get_state_summary()
-            print(f"  Spontaneous utterances: {cstate['spontaneous_count']}")
+            print(f"  Mind memories: {len(mind.memory.memories)}")
+            mstate2 = mind.get_state_summary()
+            print(f"  Spontaneous utterances: {mind.spontaneous_count}")
+            print(f"  Body fatigue: {mstate2['body_fatigue']}")
+            print(f"  Time: {mstate2['time_of_day']} (day {mstate2['day']})")
+            print(f"  Sleep pressure: {mstate2['sleep_pressure']}")
+            print(f"  Grieving: {mstate2['grieving']}")
             print(f"  ADHD mode: {'ON' if adhd_enabled else 'OFF'}")
             print()
             break
@@ -572,9 +594,9 @@ def main():
             print(f"  dreams: {dreams.dream_count}")
             print(f"  adhd_mode: {'ON' if adhd_enabled else 'OFF'}")
             print(f"  device: {state.get('device', '?')}")
-            cstate = consciousness.get_state_summary()
-            print(f"  --- Consciousness ---")
-            for key, val in cstate.items():
+            mstate2 = mind.get_state_summary()
+            print(f"  --- Mind ---")
+            for key, val in mstate2.items():
                 print(f"  {key}: {val}")
             if hasattr(model, 'get_task_summary'):
                 ts = model.get_task_summary()
@@ -751,7 +773,7 @@ def main():
         # === PLAY ===
         if cmd == 'play':
             print("  [PLAY] The model is lost in thought...")
-            play_text = consciousness.play(max_new=80)
+            play_text = mind.play(max_new=80)
             safe_print(f"  {play_text[:400]}")
             continue
 
@@ -780,14 +802,14 @@ def main():
                 print(f"  [EMOTION] REMotionalized {remotionalized} traces")
             # Homeostatic link decay
             memory_graph.decay_links(rate=0.002)
-            # === CONSCIOUSNESS DREAMS ===
-            print("  [CONSCIOUSNESS] Generating dreams from recent memories...")
+            # === MIND DREAMS ===
+            print("  [MIND] Generating dreams from recent memories...")
             for dtype in ["remix", "compression", "novelty"]:
-                dream = consciousness.dream(dream_type=dtype, temperature=1.0)
+                dream = mind.dream(dream_type=dtype, temperature=1.0)
                 if dream:
                     safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
-            consolidated = consciousness.consolidate_dreams()
-            print(f"  [CONSCIOUSNESS] Consolidated {consolidated} dreams into memory")
+            consolidated = mind.consolidate_dreams()
+            print(f"  [MIND] Consolidated {consolidated} dreams into memory")
             memory_graph.save()
             episodic.save()
             print("  [SLEEP] Cycle complete.")
@@ -840,12 +862,12 @@ def main():
             response = generate_response(
                 teach_text, model, tokenizer,
                 max_new=100, temperature=0.9,
-                consciousness=consciousness
+                mind=mind
             )
             safe_print(f"  {response[:300]}")
 
-            # Store in consciousness memory
-            consciousness.store_interaction(teach_text, response, valence=0.5)
+            # Store in mind memory
+            mind.store_interaction(teach_text, response, valence=0.5)
 
             if model.total_experience % 15 == 0:
                 model.consolidate_memory()
@@ -970,7 +992,7 @@ def main():
             response = generate_response(
                 question, model, tokenizer,
                 max_new=150, temperature=0.85,
-                consciousness=consciousness
+                mind=mind
             )
             safe_print(f"  {response[:500]}")
 
@@ -978,7 +1000,7 @@ def main():
 
             combined = tokenizer.encode(question + response[:200])
             learn_encoded(model, combined, 0.3, task_type="ask")
-            consciousness.store_interaction(question, response, valence=0.3)
+            mind.store_interaction(question, response, valence=0.3)
             continue
 
         # === DEFAULT: learn and let the model respond naturally ===
@@ -1007,12 +1029,12 @@ def main():
         response = generate_response(
             user_input, model, tokenizer,
             max_new=100, temperature=0.85,
-            consciousness=consciousness
+            mind=mind
         )
         safe_print(f"  {response[:300]}")
 
-        # Store in consciousness memory
-        consciousness.store_interaction(user_input, response, valence=0.4)
+        # Store in mind memory
+        mind.store_interaction(user_input, response, valence=0.4)
 
         if model.total_experience % 15 == 0:
             model.consolidate_memory()
