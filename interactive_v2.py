@@ -222,12 +222,16 @@ def main():
         tokenizer_ref=tokenizer,
         auto_scale=True
     )
+    model.growth_enabled = False  # prevent growth during init
     print(f"      {sum(p.numel() for p in model.parameters()):,} parameters on {DEVICE}")
     print(f"      Context: {model.max_context} tokens | Window: {model.window_size}")
 
     # Fine-tune on emotional self-expression so the model can feel its own state
     train_feelings(model, tokenizer)
     train_identity(model, tokenizer)
+
+    # Re-enable growth after init
+    model.growth_enabled = True
 
     # ============================================================
     # 3. SAFETY SYSTEM

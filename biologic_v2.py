@@ -1076,6 +1076,7 @@ def create_model(vocab_size=None, embed_dim=None, num_heads=8, num_layers=None,
         dropout=dropout,
         device=DEVICE
     )
+    m.growth_enabled = False  # defer growth until after init training
 
     if tokenizer_ref is not None:
         m.eos_token_id = tokenizer_ref.SPECIAL_TOKENS.get('<EOS>', 3)
