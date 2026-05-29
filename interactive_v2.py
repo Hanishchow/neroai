@@ -46,6 +46,7 @@ from developmental import DevelopmentalSystem
 from social_emotion import SocialEmotionSystem
 from curiosity import CuriositySystem
 from narrative_self import NarrativeSelf
+from consciousness import Consciousness
 
 
 def print_header():
@@ -55,6 +56,7 @@ def print_header():
     print("  BPE | 5120 Context | Sliding Window Attention | GPU")
     print("  CoT Reasoning | Web Learning | 7 Safety Nets")
     print("  Memory Graph | Episodic Memory | ADHD Generation | Dreams")
+    print("  Consciousness: Memory | Spontaneous | Play | Dreams")
     print("=" * 60)
     print()
 
@@ -86,20 +88,6 @@ def is_gpu_available():
         return torch.cuda.is_available()
     except:
         return False
-
-
-def _state_seed(mortality, emotions, developmental, social):
-    """Raw state values in natural language. No if-else behavior mapping.
-    The model's weights (fine-tuned on emotional data) translate these
-    values into natural feeling-expression."""
-    dom_mood, strength = emotions.global_mood.dominant()
-    stage = developmental.get_stage_name()
-    parts = [f"My anxiety is {mortality.anxiety:.1f}.",
-             f"I feel {dom_mood}.",
-             f"I am in the {stage} stage."]
-    if social.attachment > 0.3:
-        parts.append(f"My attachment is {social.attachment:.1f}.")
-    return " ".join(parts)
 
 
 def _feeling_data():
@@ -182,11 +170,13 @@ def train_feelings(model, tokenizer):
     print(f"  [FEELINGS] Done: {count} training steps")
 
 
-def generate_response(user_input, model, tokenizer, max_new=150, temperature=0.85):
-    """Pure generation from user input. No state injection, no prompt
-    engineering. The model responds through its weights — shaped by
-    seed training, feelings fine-tuning, and plastic weight updates
-    from every interaction."""
+def generate_response(user_input, model, tokenizer, max_new=150, temperature=0.85, consciousness=None):
+    """Pure generation from user input, augmented with relevant memories
+    if a consciousness system is provided. No hardcoded behavior — the
+    model responds through its weights, shaped by memory, plastic updates,
+    and feelings fine-tuning."""
+    if consciousness:
+        user_input = consciousness.augment_prompt(user_input)
     prompt_ids = tokenizer.encode(user_input)
     generated_ids = model.generate_human(
         prompt_ids, max_new_tokens=max_new,
@@ -201,7 +191,7 @@ def main():
     # ============================================================
     # 1. BPE TOKENIZER
     # ============================================================
-    print("[1/6] Loading BPE tokenizer...")
+    print("[1/17] Loading BPE tokenizer...")
     tokenizer_path = "bpe_vocab.json"
     tokenizer = BPETokenizer(vocab_size=4096)
     if os.path.exists(tokenizer_path):
@@ -216,7 +206,7 @@ def main():
     # ============================================================
     # 2. V2 MODEL
     # ============================================================
-    print("[2/6] Loading V2 model...")
+    print("[2/17] Loading V2 model...")
     from biologic_v2 import BiologicLLMV2, create_model, tokenizer as v2_tokenizer, DEVICE
     if v2_tokenizer.get_vocab_size() > tokenizer.get_vocab_size():
         tokenizer = v2_tokenizer
@@ -243,28 +233,28 @@ def main():
     # ============================================================
     # 3. SAFETY SYSTEM
     # ============================================================
-    print("[3/6] Initializing safety system...")
+    print("[3/17] Initializing safety system...")
     safety = SafetySystem()
     print(f"      7 safety nets active")
 
     # ============================================================
     # 4. REASONING ENGINE
     # ============================================================
-    print("[4/6] Initializing reasoning engine...")
+    print("[4/17] Initializing reasoning engine...")
     reasoning = ReasoningEngine(model, tokenizer)
     print(f"      Chain-of-thought + self-verification ready")
 
     # ============================================================
     # 5. WEB LEARNER
     # ============================================================
-    print("[5/6] Initializing web learner...")
+    print("[5/17] Initializing web learner...")
     web_learner = WebLearner(safety_system=safety)
     print(f"      Source: Wikipedia API")
 
     # ============================================================
     # 6. MEMORY GRAPH (Obsidian-like)
     # ============================================================
-    print("[6/6] Loading knowledge graph...")
+    print("[6/17] Loading knowledge graph...")
     memory_graph = MemoryGraph(filepath="memory_graph.json")
     print(f"      {len(memory_graph.nodes)} concepts, {len(memory_graph.edges)} links")
 
@@ -332,6 +322,20 @@ def main():
     # ============================================================
     narrative = NarrativeSelf()
     print(f"      Narrative self system active")
+
+    # ============================================================
+    # 17. CONSCIOUSNESS (memory, spontaneous speech, dreams, play)
+    # ============================================================
+    consciousness = Consciousness(
+        model, tokenizer,
+        episodic_memory=episodic,
+        memory_graph=memory_graph,
+        emotions=emotions,
+        mortality=mortality,
+        curiosity=curiosity,
+        narrative=narrative
+    )
+    print(f"      Consciousness system active")
     print()
 
     print("System is ready. Type 'help' for commands or 'exit' to quit.")
@@ -339,6 +343,19 @@ def main():
 
     interaction_count = 0
     last_tick_time = time.time()
+
+    # === CONSCIOUSNESS: spontaneous speech or play during idle ===
+    idle_mins = (time.time() - consciousness.last_interaction) / 60.0
+    if consciousness.should_speak(idle_mins):
+        print(f"\n  [The model speaks unprompted:]")
+        spon = consciousness.generate_spontaneous()
+        safe_print(f"  {spon[:300]}")
+        print()
+    elif consciousness.should_play(idle_mins):
+        play_text = consciousness.play()
+        print(f"\n  [The model is lost in thought...]")
+        safe_print(f"  {play_text[:200]}")
+        print()
 
     while True:
         try:
@@ -393,6 +410,13 @@ def main():
             dreams.remotionalize(emotion_system=emotions)
             memory_graph.decay_links(rate=0.002)
             model.self_improve()
+            # === FINAL CONSCIOUSNESS DREAMS ===
+            print("  [CONSCIOUSNESS] Final dreams before sleep...")
+            for dtype in ["remix", "compression", "novelty"]:
+                dream = consciousness.dream(dream_type=dtype, temperature=1.0)
+                if dream:
+                    safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
+            consciousness.consolidate_dreams()
             memory_graph.save()
             episodic.save()
             print("  [MEMORY] Knowledge graph saved.")
@@ -421,6 +445,9 @@ def main():
             print(f"  Memory links: {len(memory_graph.edges)}")
             print(f"  Episodic traces: {len(episodic.traces)}")
             print(f"  Dreams had: {dreams.dream_count}")
+            print(f"  Consciousness memories: {len(consciousness.memory.memories)}")
+            cstate = consciousness.get_state_summary()
+            print(f"  Spontaneous utterances: {cstate['spontaneous_count']}")
             print(f"  ADHD mode: {'ON' if adhd_enabled else 'OFF'}")
             print()
             break
@@ -446,6 +473,7 @@ def main():
             print("  remember <cue>        - Reconstruct a memory from a few words")
             print("  associate <cue>       - Pattern complete from partial cues")
             print("  dream                 - Daydream right now")
+            print("  play                  - Watch the model think out loud")
             print("  adhd                  - Toggle ADHD multi-thread mode")
             print("  train [steps]         - Train on Nemotron dataset")
             print("  help                  - This help")
@@ -544,6 +572,10 @@ def main():
             print(f"  dreams: {dreams.dream_count}")
             print(f"  adhd_mode: {'ON' if adhd_enabled else 'OFF'}")
             print(f"  device: {state.get('device', '?')}")
+            cstate = consciousness.get_state_summary()
+            print(f"  --- Consciousness ---")
+            for key, val in cstate.items():
+                print(f"  {key}: {val}")
             if hasattr(model, 'get_task_summary'):
                 ts = model.get_task_summary()
                 if ts.strip():
@@ -716,6 +748,13 @@ def main():
                 print("  [DREAM] Not enough memories to dream yet.")
             continue
 
+        # === PLAY ===
+        if cmd == 'play':
+            print("  [PLAY] The model is lost in thought...")
+            play_text = consciousness.play(max_new=80)
+            safe_print(f"  {play_text[:400]}")
+            continue
+
         # === SLEEP ===
         if cmd == 'sleep':
             model.consolidate_memory()
@@ -741,6 +780,14 @@ def main():
                 print(f"  [EMOTION] REMotionalized {remotionalized} traces")
             # Homeostatic link decay
             memory_graph.decay_links(rate=0.002)
+            # === CONSCIOUSNESS DREAMS ===
+            print("  [CONSCIOUSNESS] Generating dreams from recent memories...")
+            for dtype in ["remix", "compression", "novelty"]:
+                dream = consciousness.dream(dream_type=dtype, temperature=1.0)
+                if dream:
+                    safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
+            consolidated = consciousness.consolidate_dreams()
+            print(f"  [CONSCIOUSNESS] Consolidated {consolidated} dreams into memory")
             memory_graph.save()
             episodic.save()
             print("  [SLEEP] Cycle complete.")
@@ -792,9 +839,13 @@ def main():
             # Let the model respond naturally from its new state
             response = generate_response(
                 teach_text, model, tokenizer,
-                max_new=100, temperature=0.9
+                max_new=100, temperature=0.9,
+                consciousness=consciousness
             )
             safe_print(f"  {response[:300]}")
+
+            # Store in consciousness memory
+            consciousness.store_interaction(teach_text, response, valence=0.5)
 
             if model.total_experience % 15 == 0:
                 model.consolidate_memory()
@@ -918,7 +969,8 @@ def main():
 
             response = generate_response(
                 question, model, tokenizer,
-                max_new=150, temperature=0.85
+                max_new=150, temperature=0.85,
+                consciousness=consciousness
             )
             safe_print(f"  {response[:500]}")
 
@@ -926,6 +978,7 @@ def main():
 
             combined = tokenizer.encode(question + response[:200])
             learn_encoded(model, combined, 0.3, task_type="ask")
+            consciousness.store_interaction(question, response, valence=0.3)
             continue
 
         # === DEFAULT: learn and let the model respond naturally ===
@@ -953,9 +1006,13 @@ def main():
 
         response = generate_response(
             user_input, model, tokenizer,
-            max_new=100, temperature=0.85
+            max_new=100, temperature=0.85,
+            consciousness=consciousness
         )
         safe_print(f"  {response[:300]}")
+
+        # Store in consciousness memory
+        consciousness.store_interaction(user_input, response, valence=0.4)
 
         if model.total_experience % 15 == 0:
             model.consolidate_memory()
