@@ -306,6 +306,8 @@ class BiologicLLMV2(nn.Module):
         self.device = device or DEVICE
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
         self.max_context = max_context
         self.window_size = window_size
 
@@ -335,6 +337,13 @@ class BiologicLLMV2(nn.Module):
 
         self.register_buffer('total_experience', torch.tensor(0))
         self.register_buffer('curiosity_level', torch.tensor(0.3))
+
+        # Progressive growth tracking
+        self.growth_enabled = True
+        self.target_params = 200_000_000
+        self._last_growth_exp = 0
+        self._plateau_check = []
+        self._growth_epochs = 0
 
         self.experience_buffer = deque(maxlen=2000)
         self.long_term_memory = []
@@ -834,6 +843,123 @@ class BiologicLLMV2(nn.Module):
         )
         print(f"  [SLEEP] Buffer: {len(self.experience_buffer)} | Curiosity: {self.curiosity_level:.2f}")
 
+        # === PROGRESSIVE GROWTH ===
+        if self.growth_enabled:
+            self._check_growth()
+
+    def _param_count(self):
+        return sum(p.numel() for p in self.parameters())
+
+    def _should_grow(self):
+        """Check if model has plateaued and should grow."""
+        current = self._param_count()
+        if current >= self.target_params:
+            return False
+        # Enough experience since last growth
+        exp_since_last = int(self.total_experience) - self._last_growth_exp
+        if exp_since_last < 500:
+            return False
+        # Loss plateau: last 100 losses have low variance
+        if len(self.loss_history) < 100:
+            return False
+        recent = self.loss_history[-100:]
+        recent = [l for l in recent if l is not None and not (isinstance(l, float) and np.isnan(l))]
+        if len(recent) < 50:
+            return False
+        variance = float(np.var(recent))
+        mean_loss = float(np.mean(recent))
+        return variance < 0.5 and mean_loss > 0.5
+
+    def _grow(self):
+        """Grow the model wider and deeper. Creates new parameters,
+        copies old weights (top-left), initialises remainder with noise."""
+        old_dim = self.embed_dim
+        old_layers = len(self.blocks)
+        num_heads = self.num_heads
+
+        # Compute new dimensions: grow by 1.3x, round to multiple of num_heads
+        new_dim = int(old_dim * 1.3)
+        new_dim = (new_dim // num_heads) * num_heads
+        new_dim = max(new_dim, old_dim + num_heads)  # must be larger
+
+        # Potentially add a layer too (every other growth event)
+        add_layer = self._growth_epochs % 2 == 1
+        new_layers = old_layers + (1 if add_layer else 0)
+
+        self._growth_epochs += 1
+        print(f"\n  [GROWTH] Expanding: {old_dim}d x {old_layers}layers -> {new_dim}d x {new_layers}layers")
+
+        # --- Save old state ---
+        old_sd = {}
+        for name, param in self.named_parameters():
+            old_sd[name] = param.data.clone()
+        old_buffers = {}
+        for name, buf in self.named_buffers():
+            old_buffers[name] = buf.clone()
+
+        # --- Create new model with target dimensions ---
+        new_model = BiologicLLMV2(
+            vocab_size=self.vocab_size,
+            embed_dim=new_dim,
+            num_heads=num_heads,
+            num_layers=new_layers,
+            max_context=self.max_context,
+            window_size=self.window_size,
+            device=self.device
+        )
+        new_model.eval()
+
+        # --- Copy old weights into new model ---
+        new_sd = new_model.state_dict()
+        for key in new_sd:
+            if key in old_sd:
+                old_t = old_sd[key]
+                new_t = new_sd[key]
+                # Copy overlapping region (top-left slice)
+                slices = tuple(slice(0, min(o, n)) for o, n in zip(old_t.shape, new_t.shape))
+                new_t[slices] = old_t[slices]
+                # For newly added dimensions, the default init (from nn.Embedding/nn.Linear)
+                # is already appropriate — small normal noise.
+            # If key not in old_sd (e.g. new layer blocks.6.*), keep default init
+
+        new_model.load_state_dict(new_sd)
+
+        # --- Transfer buffers, experience, and metadata ---
+        for name, buf in old_buffers.items():
+            if name in new_model._buffers:
+                new_model._buffers[name] = buf
+        new_model.total_experience = self.total_experience.clone()
+        new_model.curiosity_level = self.curiosity_level.clone()
+        new_model.experience_buffer = self.experience_buffer
+        new_model.long_term_memory = self.long_term_memory
+        new_model.learning_rate_history = self.learning_rate_history
+        new_model.surprise_history = self.surprise_history
+        new_model.loss_history = self.loss_history
+        new_model.task_type_history = self.task_type_history
+        new_model.task_profiles = self.task_profiles
+        new_model._nan_streak = self._nan_streak
+        new_model._growth_epochs = self._growth_epochs
+        new_model._plateau_check = self._plateau_check
+        if self._optimizer is not None:
+            new_model._create_optimizer()
+
+        # --- Swap self's internal state with new model ---
+        self.__class__ = new_model.__class__
+        self.__dict__ = new_model.__dict__
+
+        total = self._param_count()
+        print(f"  [GROWTH] New parameter count: {total:,}")
+        target_msg = f"  [GROWTH] {total / self.target_params * 100:.1f}% toward {self.target_params:,} target" if total < self.target_params else "  [GROWTH] Target reached."
+        print(target_msg)
+
+    def _check_growth(self):
+        """Called during consolidate_memory. Triggers growth on plateau."""
+        self._plateau_check.append(float(np.nanmean(self.loss_history[-50:])) if self.loss_history else 10.0)
+        if len(self._plateau_check) > 20:
+            self._plateau_check.pop(0)
+        if self._should_grow():
+            self._grow()
+
     def self_improve(self):
         """Meta-controller: analyze and suggest improvements."""
         if len(self.surprise_history) < 10:
@@ -885,6 +1011,11 @@ class BiologicLLMV2(nn.Module):
         return {
             'total_experience': int(self.total_experience),
             'curiosity_level': float(self.curiosity_level),
+            'parameters': sum(p.numel() for p in self.parameters()),
+            'embed_dim': self.embed_dim,
+            'num_layers': len(self.blocks),
+            'growth_epochs': self._growth_epochs,
+            'growth_progress': f"{sum(p.numel() for p in self.parameters()):,} / {self.target_params:,}",
             'buffer_size': len(self.experience_buffer),
             'recent_surprise': float(np.mean(self.surprise_history[-20:])) if self.surprise_history else 0,
             'avg_loss': float(np.nanmean(self.loss_history[-20:])) if self.loss_history else 0,
