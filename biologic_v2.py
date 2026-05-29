@@ -340,7 +340,7 @@ class BiologicLLMV2(nn.Module):
 
         # Progressive growth tracking
         self.growth_enabled = True
-        self.target_params = 200_000_000
+        self.target_params = 7_000_000_000
         self._last_growth_exp = 0
         self._plateau_check = []
         self._growth_epochs = 0
@@ -878,13 +878,12 @@ class BiologicLLMV2(nn.Module):
         num_heads = self.num_heads
 
         # Compute new dimensions: grow by 1.3x, round to multiple of num_heads
-        new_dim = int(old_dim * 1.3)
+        new_dim = int(old_dim * 1.5)
         new_dim = (new_dim // num_heads) * num_heads
         new_dim = max(new_dim, old_dim + num_heads)  # must be larger
 
-        # Potentially add a layer too (every other growth event)
-        add_layer = self._growth_epochs % 2 == 1
-        new_layers = old_layers + (1 if add_layer else 0)
+        # Add a layer every growth cycle (depth scales with width)
+        new_layers = old_layers + 1
 
         self._growth_epochs += 1
         print(f"\n  [GROWTH] Expanding: {old_dim}d x {old_layers}layers -> {new_dim}d x {new_layers}layers")
