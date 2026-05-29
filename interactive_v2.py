@@ -223,7 +223,7 @@ def main():
 
     # Auto-scale on GPU, use defaults on CPU
     is_gpu = str(DEVICE) != 'cpu' and is_gpu_available()
-    embed_dim = 512 if is_gpu else 256
+    embed_dim = 512 if is_gpu else 688
     num_layers = 12 if is_gpu else 8
 
     model = create_model(
