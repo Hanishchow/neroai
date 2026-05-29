@@ -129,7 +129,7 @@ def main():
             continue
 
         if cmd == 'state':
-            print(f"  Body: fatigue={mind.body.fatigue:.2f}, heartbeat={mind.body.heartbeat:.0f}bpm")
+            print(f"  Body: fatigue={mind.body.fatigue:.2f}, heart_rate={mind.body.heart_rate:.0f}bpm")
             print(f"  Sleep: {mind.sleep_pressure.pressure:.2f}")
             print(f"  Grief: {mind.grief.intensity:.2f}")
             print(f"  ToM: mood={mind.theory_of_mind.user_mood}, intent={mind.theory_of_mind.user_intent}")
