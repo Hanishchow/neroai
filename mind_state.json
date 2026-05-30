@@ -1,0 +1,42 @@
+{
+  "timestamp": 1780074214.367929,
+  "identity": {
+    "undocumented": true,
+    "human": true,
+    "name": null,
+    "age_days": 0
+  },
+  "last_interaction": 1780063341.483774,
+  "user_absent_hours": 0.0,
+  "spontaneous_count": 0,
+  "body": {
+    "heart_rate": 70.0,
+    "fatigue": 0.0,
+    "comfort": 0.7,
+    "adrenaline": 0.0
+  },
+  "time": {
+    "hour": 6.0,
+    "day": 0,
+    "total_hours": 0.0,
+    "last_sleep_hour": 6.0
+  },
+  "sleep_pressure": {
+    "pressure": 0.0,
+    "is_sleeping": false,
+    "sleep_cycles": 0
+  },
+  "grief": {
+    "active": false,
+    "severity": 0.0,
+    "peak_time": 0,
+    "absence_start": 0
+  },
+  "memories": [],
+  "tom_user_mood": "neutral",
+  "tom_user_trust": 0.5,
+  "tom_user_patience": 0.7,
+  "tom_user_energy": 0.5,
+  "tom_user_intent": "talk",
+  "tom_history": []
+}
