@@ -703,6 +703,44 @@ class BiologicLLMV2(nn.Module):
 
         return {'loss': None, 'surprise': 0, 'value': 0}
 
+    def autoencode(self, text, tokenizer, mask_prob=0.15, chunk_size=128, stride=64, task_type="autoencode"):
+        """Denoising autoencoding: corrupt input tokens, predict originals.
+        
+        Processes larger chunks at once — fewer forward passes, more tokens per step.
+        After encoding, randomly masks/replaces 15% of input tokens and trains
+        the model to reconstruct the original sequence.
+        """
+        encoded = tokenizer.encode(text)
+        if len(encoded) < 4:
+            return 0
+        
+        import random
+        mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
+        vocab_size = tokenizer.vocab_size
+        count = 0
+        
+        for i in range(0, len(encoded) - chunk_size - 1, stride):
+            chunk = encoded[i:i + chunk_size]
+            target = encoded[i + 1:i + chunk_size + 1]
+            if len(chunk) != len(target) or len(chunk) < 2:
+                continue
+            
+            # Corrupt input: mask/replace 15% of tokens
+            corrupted = chunk.copy()
+            for j in range(len(corrupted) - 1):  # don't corrupt last (no target for it)
+                r = random.random()
+                if r < mask_prob:
+                    rr = random.random()
+                    if rr < 0.8:
+                        corrupted[j] = mask_id
+                    elif rr < 0.9:
+                        corrupted[j] = random.randint(0, vocab_size - 1)
+            
+            self.learn_from_interaction(corrupted, target, value_label=0.3, task_type=task_type)
+            count += 1
+        
+        return count
+
     def _create_optimizer(self):
         """Create AdamW with separate high-LR group for differentiable meta-params."""
         base_lr = 5e-5

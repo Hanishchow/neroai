@@ -50,25 +50,14 @@ def main():
     seed_epochs = 1
     if len(sys.argv) > 1 and sys.argv[1] == '--seed5':
         seed_epochs = 5
-    print(f"\n  Quick seed ({seed_epochs} epoch{'s' if seed_epochs > 1 else ''}, ~{470*seed_epochs} steps)...", flush=True)
+    print(f"\n  Quick autoencoding seed ({seed_epochs} epoch{'s' if seed_epochs > 1 else ''})...", flush=True)
     for epoch in range(seed_epochs):
         total = 0
         for domain, text in SEED_TEXTS.items():
-            encoded = tokenizer.encode(text)
-            if len(encoded) < 4:
-                continue
-            chunk_size = min(32, len(encoded) - 2)
-            stride = max(4, chunk_size // 4)
-            count = 0
-            for i in range(0, len(encoded) - chunk_size - 1, stride):
-                chunk = encoded[i:i + chunk_size]
-                target = encoded[i + 1:i + chunk_size + 1]
-                if len(chunk) == len(target) and len(chunk) > 1:
-                    model.learn_from_interaction(chunk, target, value_label=0.3, task_type=domain)
-                    count += 1
-            total += count
+            steps = model.autoencode(text, tokenizer, mask_prob=0.15, chunk_size=128, stride=64, task_type=domain)
+            total += steps
             if epoch == 0:
-                print(f"    {domain}: {count} steps", flush=True)
+                print(f"    {domain}: {steps} steps (128-token chunks)", flush=True)
         if seed_epochs > 1:
             print(f"  Epoch {epoch+1}/{seed_epochs}: {total} steps", flush=True)
         else:
