@@ -12,11 +12,60 @@ def safe_print(text):
     sys.stdout.write('\n')
     sys.stdout.flush()
 
+def train_file(model, tokenizer, filepath, chunk_size=256, stride=128, mask_prob=0.15):
+    """Train model on a text file using autoencoding. Returns total steps."""
+    print(f"\n  Training on {filepath}...", flush=True)
+    size = os.path.getsize(filepath)
+    print(f"  File size: {size/1e6:.1f} MB", flush=True)
+
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+
+    encoded = tokenizer.encode(text)
+    total_tokens = len(encoded)
+    print(f"  Tokens: {total_tokens:,}", flush=True)
+
+    import random
+    mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
+    vocab_size = tokenizer.vocab_size
+    count = 0
+    start = time.time()
+    for i in range(0, total_tokens - chunk_size - 1, stride):
+        chunk = encoded[i:i + chunk_size]
+        target = encoded[i + 1:i + chunk_size + 1]
+        if len(chunk) != len(target) or len(chunk) < 2:
+            continue
+
+        corrupted = chunk.copy()
+        for j in range(len(corrupted) - 1):
+            r = random.random()
+            if r < mask_prob:
+                rr = random.random()
+                if rr < 0.8:
+                    corrupted[j] = mask_id
+                elif rr < 0.9:
+                    corrupted[j] = random.randint(0, vocab_size - 1)
+
+        model.learn_from_interaction(corrupted, target, value_label=0.3, task_type="book")
+        count += 1
+
+        if count % 50 == 0:
+            elapsed = time.time() - start
+            rate = count / elapsed if elapsed > 0 else 0
+            rem = (total_tokens // stride - count) / rate if rate > 0 else 0
+            progress = count * stride * 100 / total_tokens if total_tokens else 0
+            print(f"    {count} chunks ({progress:.0f}%), {rate:.2f} ch/s, ~{rem:.0f}s remaining", end='\r', flush=True)
+
+    elapsed = time.time() - start
+    print(f"\n    Done: {count} chunks in {elapsed:.0f}s ({count/elapsed:.1f} ch/s)" if elapsed > 0 else f"\n    Done: {count} chunks")
+    return count
+
+
 def main():
     print("=" * 60)
     print("  NERO — TALK")
     print("  200M params | 16K context | no growth | 1 epoch autoencoding")
-    print("  Use --seed5 for 5 epochs (slower but better)")
+    print("  Use --seed5 for 5 epochs | --train-file <path> to preload a book")
     print("=" * 60)
 
     # --- Tokenizer ---
@@ -62,6 +111,14 @@ def main():
             print(f"  Epoch {epoch+1}/{seed_epochs}: {total} steps", flush=True)
         else:
             print(f"    Total: {total} steps", flush=True)
+
+    # ---Preload file if provided ---
+    train_path = None
+    for i, arg in enumerate(sys.argv):
+        if arg == '--train-file' and i + 1 < len(sys.argv):
+            train_path = sys.argv[i + 1]
+    if train_path and os.path.exists(train_path):
+        train_file(model, tokenizer, train_path)
 
     # --- Subsystems ---
     print("[3] Loading subsystems...")
@@ -116,13 +173,14 @@ def main():
 
         if cmd == 'help':
             print("  ask <q>     generate response")
-            print("  teach <t>   learn from text")
-            print("  sleep       consolidate memory")
-            print("  dream       daydream")
-            print("  state       mind state")
-            print("  grow        trigger neural growth (one-time)")
-            print("  help        this")
-            print("  exit        quit")
+            print("  train-file <path>  train on a text file (autoencoding)")
+            print("  teach <t>          learn from short text")
+            print("  sleep              consolidate memory")
+            print("  dream              daydream")
+            print("  state              mind state")
+            print("  grow               trigger neural growth (one-time)")
+            print("  help               this")
+            print("  exit               quit")
             continue
 
         if cmd == 'grow':
@@ -137,6 +195,14 @@ def main():
             print(f"  ToM: mood={mind.theory_of_mind.user_mood}, intent={mind.theory_of_mind.user_intent}")
             print(f"  Goals: {[g['description'][:40] for g in mind.goal_system.active_goals]}")
             print(f"  Memories: {len(mind.memory.memories)}")
+            continue
+
+        if cmd.startswith('train-file '):
+            fpath = user_input[11:]
+            if os.path.exists(fpath):
+                train_file(model, tokenizer, fpath)
+            else:
+                print(f"    File not found: {fpath}")
             continue
 
         if cmd.startswith('teach '):
