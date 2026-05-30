@@ -15,7 +15,8 @@ def safe_print(text):
 def main():
     print("=" * 60)
     print("  NERO — TALK")
-    print("  200M params | no training | no growth | just conversation")
+    print("  200M params | no growth | 1 quick epoch seed")
+    print("  Use --seed5 for 5 epochs (slower but better)")
     print("=" * 60)
 
     # --- Tokenizer ---
@@ -29,18 +30,49 @@ def main():
         print("    No tokenizer found. Run interactive_v2.py first to create one.")
         return
 
-    # --- 200M model with seed learning (no growth) ---
-    print("[2] Creating 200M model with seed learning...")
-    from biologic_v2 import create_model, DEVICE
-    model = create_model(
+    # --- 200M model without seed learning (do quick 1-epoch ourselves) ---
+    print("[2] Creating 200M model...")
+    from biologic_v2 import BiologicLLMV2, SEED_TEXTS, DEVICE
+    model = BiologicLLMV2(
         vocab_size=tokenizer.vocab_size,
         embed_dim=1408, num_heads=8, num_layers=8,
         max_context=5120, window_size=512, dropout=0.1,
-        do_seed_learning=True, tokenizer_ref=tokenizer, auto_scale=False
+        device=DEVICE
     )
     model.growth_enabled = False
+    model.eval()
+    model.eos_token_id = tokenizer.SPECIAL_TOKENS.get('<EOS>', 3)
+    model.bos_token_id = tokenizer.SPECIAL_TOKENS.get('<BOS>', 2)
     p = sum(p.numel() for p in model.parameters())
-    print(f"    {p:,} params ({p/1e6:.0f}M) | growth disabled")
+    print(f"    {p:,} params ({p/1e6:.0f}M)")
+
+    # Quick 1-epoch seed so model can speak (optional: more epochs via seed_epochs=N)
+    seed_epochs = 1
+    if len(sys.argv) > 1 and sys.argv[1] == '--seed5':
+        seed_epochs = 5
+    print(f"\n  Quick seed ({seed_epochs} epoch{'s' if seed_epochs > 1 else ''}, ~{470*seed_epochs} steps)...", flush=True)
+    for epoch in range(seed_epochs):
+        total = 0
+        for domain, text in SEED_TEXTS.items():
+            encoded = tokenizer.encode(text)
+            if len(encoded) < 4:
+                continue
+            chunk_size = min(32, len(encoded) - 2)
+            stride = max(4, chunk_size // 4)
+            count = 0
+            for i in range(0, len(encoded) - chunk_size - 1, stride):
+                chunk = encoded[i:i + chunk_size]
+                target = encoded[i + 1:i + chunk_size + 1]
+                if len(chunk) == len(target) and len(chunk) > 1:
+                    model.learn_from_interaction(chunk, target, value_label=0.3, task_type=domain)
+                    count += 1
+            total += count
+            if epoch == 0:
+                print(f"    {domain}: {count} steps", flush=True)
+        if seed_epochs > 1:
+            print(f"  Epoch {epoch+1}/{seed_epochs}: {total} steps", flush=True)
+        else:
+            print(f"    Total: {total} steps", flush=True)
 
     # --- Subsystems ---
     print("[3] Loading subsystems...")
