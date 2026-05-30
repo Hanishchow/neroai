@@ -15,7 +15,7 @@ def safe_print(text):
 def main():
     print("=" * 60)
     print("  NERO — TALK")
-    print("  200M params | no growth | 1 quick epoch seed")
+    print("  200M params | 16K context | no growth | 1 epoch autoencoding")
     print("  Use --seed5 for 5 epochs (slower but better)")
     print("=" * 60)
 
@@ -36,7 +36,7 @@ def main():
     model = BiologicLLMV2(
         vocab_size=tokenizer.vocab_size,
         embed_dim=1408, num_heads=8, num_layers=8,
-        max_context=5120, window_size=512, dropout=0.1,
+        max_context=16384, window_size=1024, dropout=0.1,
         device=DEVICE
     )
     model.growth_enabled = False
@@ -54,7 +54,7 @@ def main():
     for epoch in range(seed_epochs):
         total = 0
         for domain, text in SEED_TEXTS.items():
-            steps = model.autoencode(text, tokenizer, mask_prob=0.15, chunk_size=128, stride=64, task_type=domain)
+            steps = model.autoencode(text, tokenizer, mask_prob=0.15, chunk_size=256, stride=128, task_type=domain)
             total += steps
             if epoch == 0:
                 print(f"    {domain}: {steps} steps (128-token chunks)", flush=True)
@@ -141,14 +141,8 @@ def main():
 
         if cmd.startswith('teach '):
             text = user_input[6:]
-            encoded = tokenizer.encode(text)
-            if len(encoded) > 3:
-                for i in range(0, len(encoded) - 16, 8):
-                    chunk = encoded[i:i+16]
-                    target = encoded[i+1:i+17]
-                    if len(chunk) == len(target):
-                        model.learn_from_interaction(chunk, target, value_label=0.5, task_type="teach")
-                print(f"    Learned {len(encoded)} tokens")
+            steps = model.autoencode(text, tokenizer, mask_prob=0.15, chunk_size=256, stride=128, task_type="teach")
+            print(f"    Learned: {steps} chunks")
             continue
 
         if cmd == 'sleep':
@@ -172,7 +166,7 @@ def main():
             mortality.register_input(richness=0.3)
 
         question = user_input[4:] if cmd.startswith('ask ') else user_input
-        reply = mind.generate(question, max_new=150, temperature=0.85)
+        reply = mind.generate(question, max_new=300, temperature=0.85)
         if reply:
             safe_print(f"  {reply}")
         else:
@@ -180,8 +174,8 @@ def main():
             prompt = f"User: {question}\n"
             prompt_ids = tokenizer.encode(prompt)
             if len(prompt_ids) >= 2:
-                prompt_ids = prompt_ids[:model.max_context - 150 - 2]
-                gen = generate_with_gestalt(model, tokenizer, prompt_ids, max_new_tokens=150, gestalt_temp=1.4, main_temp=0.85)
+                prompt_ids = prompt_ids[:model.max_context - 300 - 2]
+                gen = generate_with_gestalt(model, tokenizer, prompt_ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
                 safe_print(f"  {tokenizer.decode(gen)}")
 
     print("Goodbye.")
