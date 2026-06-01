@@ -42,7 +42,8 @@ def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0
 
 
 def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_prob=0.0, epochs=5, batch_size=16):
-    """Batched GPU training: pre-compute chunks, process in mini-batches with gradient accumulation."""
+    """Batched GPU training: pre-compute chunks, process in mini-batches."""
+    import numpy as np
     import torch
     print(f"\n{'='*60}")
     print(f"  GPU-OPTIMIZED TRAINING ON: {os.path.basename(filepath)}")
