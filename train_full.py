@@ -28,9 +28,11 @@ def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0
         mask_r = np.random.random(len(chunk))
         type_r = np.random.random(len(chunk))
         corrupted = chunk.copy()
-        to_mask = mask_r < mask_prob
+        replace_mask = to_mask & (type_r >= 0.8) & (type_r < 0.9)
         corrupted[to_mask & (type_r < 0.8)] = mask_id
-        corrupted[to_mask & (type_r >= 0.8) & (type_r < 0.9)] = np.random.randint(0, vocab_size, size=to_mask.sum())
+        n_replace = replace_mask.sum()
+        if n_replace > 0:
+            corrupted[replace_mask] = np.random.randint(0, vocab_size, size=n_replace)
         inputs.append(corrupted)
         targets.append(tgt)
     return inputs, targets
