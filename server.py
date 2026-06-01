@@ -50,12 +50,11 @@ def chat(message, history):
         return ""
     reply = mind.generate(message, max_new=300, temperature=0.85)
     if not reply:
-        from biologic_v2 import generate_with_gestalt
         prompt = f"User: {message}\n"
         ids = tokenizer.encode(prompt)
         if len(ids) >= 2:
             ids = ids[:model.max_context - 300 - 2]
-            gen = generate_with_gestalt(model, tokenizer, ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
+            gen = model.generate_human(ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
             reply = tokenizer.decode(gen)
     return reply
 
@@ -86,12 +85,11 @@ if args.api:
     def chat_api(req: ChatRequest):
         reply = mind.generate(req.message, max_new=req.max_tokens, temperature=req.temperature)
         if not reply:
-            from biologic_v2 import generate_with_gestalt
             prompt = f"User: {req.message}\n"
             ids = tokenizer.encode(prompt)
             if len(ids) >= 2:
                 ids = ids[:model.max_context - req.max_tokens - 2]
-                gen = generate_with_gestalt(model, tokenizer, ids, max_new_tokens=req.max_tokens, gestalt_temp=1.4, main_temp=req.temperature)
+                gen = model.generate_human(ids, max_new_tokens=req.max_tokens, gestalt_temp=1.4, main_temp=req.temperature)
                 reply = tokenizer.decode(gen)
         return ChatResponse(reply=reply)
 
