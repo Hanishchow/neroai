@@ -13,64 +13,115 @@ def safe_print(text):
     sys.stdout.write('\n')
     sys.stdout.flush()
 
-def train_on_file(model, tokenizer, filepath, chunk_size=256, stride=128, mask_prob=0.15, epochs=1):
-    """Train model on a text file using denoising autoencoding. Returns total steps."""
+def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0.15):
+    """Pre-compute all corrupted chunks as numpy arrays (GPU-efficient preprocessing)."""
+    import numpy as np
+    mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
+    vocab_size = tokenizer.vocab_size
+    inputs, targets = [], []
+    for i in range(0, len(encoded) - chunk_size - 1, stride):
+        chunk = np.array(encoded[i:i + chunk_size], dtype=np.int64)
+        tgt = np.array(encoded[i + 1:i + chunk_size + 1], dtype=np.int64)
+        if len(chunk) != len(tgt) or len(chunk) < 2:
+            continue
+        # Vectorized corruption (no Python loop)
+        mask_r = np.random.random(len(chunk))
+        type_r = np.random.random(len(chunk))
+        corrupted = chunk.copy()
+        to_mask = mask_r < mask_prob
+        corrupted[to_mask & (type_r < 0.8)] = mask_id
+        corrupted[to_mask & (type_r >= 0.8) & (type_r < 0.9)] = np.random.randint(0, vocab_size, size=to_mask.sum())
+        inputs.append(corrupted)
+        targets.append(tgt)
+    return inputs, targets
+
+
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_prob=0.15, epochs=3, batch_size=16):
+    """Batched GPU training: pre-compute chunks, process in mini-batches with gradient accumulation."""
+    import torch
     print(f"\n{'='*60}")
-    print(f"  TRAINING ON: {os.path.basename(filepath)}")
-    print(f"  {epochs} epoch{'s' if epochs > 1 else ''} | {chunk_size}-token chunks | stride {stride}")
+    print(f"  GPU-OPTIMIZED TRAINING ON: {os.path.basename(filepath)}")
+    print(f"  {epochs} epochs | {chunk_size}-token chunks | stride {stride} | batch_size={batch_size}")
     print(f"{'='*60}")
     
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         text = f.read()
+    print(f"  File size: {os.path.getsize(filepath)/1e6:.1f} MB | Encoding...", end=' ', flush=True)
     encoded = tokenizer.encode(text)
     total_tokens = len(encoded)
-    print(f"  File size: {os.path.getsize(filepath)/1e6:.1f} MB | Tokens: {total_tokens:,}")
+    print(f"Tokens: {total_tokens:,}")
     
-    mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
-    vocab_size = tokenizer.vocab_size
-    total_chunks = 0
+    # Pre-compute all chunks (GPU not waiting for Python)
+    print(f"  Pre-computing chunks...", flush=True)
+    all_inputs, all_targets = prepare_batches(encoded, tokenizer, chunk_size, stride, mask_prob)
+    n_chunks = len(all_inputs)
+    print(f"  Chunks: {n_chunks:,} | Tokens/chunk: {chunk_size}")
+    
+    model.train()
+    if model._optimizer is None:
+        model._create_optimizer()
+    
+    # Set up optimizer with higher LR for bulk training
+    for pg in model._optimizer.param_groups:
+        pg['lr'] = pg.get('_base_lr', 5e-5) * 2.0  # double LR for bulk
+    
+    device = model.device
+    total_processed = 0
     grand_start = time.time()
     
     for epoch in range(epochs):
-        count = 0
         epoch_start = time.time()
-        step_times = []
+        indices = list(range(n_chunks))
+        random.shuffle(indices)
         
-        for i in range(0, total_tokens - chunk_size - 1, stride):
-            chunk = encoded[i:i + chunk_size]
-            target = encoded[i + 1:i + chunk_size + 1]
-            if len(chunk) != len(target) or len(chunk) < 2:
-                continue
+        optimizer = model._optimizer
+        epoch_loss = 0.0
+        
+        for bidx in range(0, n_chunks, batch_size):
+            batch_idx = indices[bidx:bidx + batch_size]
+            B = len(batch_idx)
+            batch_inputs = [all_inputs[i] for i in batch_idx]
+            batch_targets = [all_targets[i] for i in batch_idx]
             
-            corrupted = chunk.copy()
-            for j in range(len(corrupted) - 1):
-                r = random.random()
-                if r < mask_prob:
-                    rr = random.random()
-                    if rr < 0.8:
-                        corrupted[j] = mask_id
-                    elif rr < 0.9:
-                        corrupted[j] = random.randint(0, vocab_size - 1)
+            inp = torch.tensor(np.stack(batch_inputs), dtype=torch.long, device=device)
+            tgt = torch.tensor(np.stack(batch_targets), dtype=torch.long, device=device)
             
-            t0 = time.time()
-            model.learn_from_interaction(corrupted, target, value_label=0.3, task_type="book")
-            step_times.append(time.time() - t0)
-            count += 1
-            total_chunks += 1
+            logits, loss, value = model(inp, targets=tgt, return_value=True)
             
-            if count % 100 == 0:
-                avg = sum(step_times[-100:]) / max(len(step_times[-100:]), 1)
-                rem_chunks = ((total_tokens - chunk_size - 1) // stride) - count
-                eta = rem_chunks * avg
-                pct = count * stride * 100 / max(total_tokens, 1)
-                print(f"  Epoch {epoch+1}/{epochs}: {count} chunks ({pct:.0f}%) | {avg*1000:.0f}ms/chunk | ETA: {eta/60:.1f}min", end='\r', flush=True)
+            if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
+                optimizer.zero_grad()
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                if not (torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm < 1e-8):
+                    optimizer.step()
+                epoch_loss += loss.item()
+                total_processed += B
+                
+                # Track minimal stats for the model
+                model.total_experience += B
+                model.loss_history.append(loss.item())
+                model.surprise_history.append(min(5.0, max(0, (loss.item() - 0.5) * 2)))
+            
+            if (bidx // batch_size) % 20 == 0 and bidx > 0:
+                pct = bidx * 100 / n_chunks
+                elapsed = time.time() - epoch_start
+                rate = bidx / elapsed if elapsed > 0 else 0
+                rem = (n_chunks - bidx) / rate if rate > 0 else 0
+                avg_loss = epoch_loss / max(bidx, 1)
+                print(f"  Epoch {epoch+1}/{epochs}: {bidx}/{n_chunks} ({pct:.0f}%) | loss={avg_loss:.4f} | {rate:.0f}ch/s | ETA {rem:.0f}s", flush=True)
         
         elapsed = time.time() - epoch_start
-        print(f"\n  Epoch {epoch+1}/{epochs} done: {count} chunks in {elapsed:.0f}s ({count/elapsed:.1f} ch/s)" if elapsed > 0 else "")
+        avg_loss = epoch_loss / max(n_chunks, 1)
+        print(f"  Epoch {epoch+1}/{epochs} done: {n_chunks} chunks in {elapsed:.0f}s | avg_loss={avg_loss:.4f}")
     
     total_elapsed = time.time() - grand_start
-    print(f"  TOTAL: {total_chunks} chunks in {total_elapsed:.0f}s")
-    return total_chunks
+    print(f"  TOTAL: {n_chunks * epochs} chunks in {total_elapsed:.0f}s ({n_chunks * epochs / total_elapsed:.0f} ch/s)")
+    print(f"{'='*60}")
+    return n_chunks * epochs
+
+
+# Keep old name for backward compat
+train_on_file = train_batched
 
 
 def main():
@@ -175,7 +226,7 @@ def main():
     
     # --- Book training ---
     if filepath and os.path.exists(filepath):
-        train_on_file(model, tokenizer, filepath, epochs=epochs)
+        train_batched(model, tokenizer, filepath, epochs=epochs)
     
     # --- Save checkpoint if requested ---
     if save_path:
