@@ -27,6 +27,7 @@ def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0
         # Vectorized corruption (no Python loop)
         mask_r = np.random.random(len(chunk))
         type_r = np.random.random(len(chunk))
+        to_mask = mask_r < mask_prob
         corrupted = chunk.copy()
         replace_mask = to_mask & (type_r >= 0.8) & (type_r < 0.9)
         corrupted[to_mask & (type_r < 0.8)] = mask_id
