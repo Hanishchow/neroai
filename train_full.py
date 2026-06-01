@@ -14,7 +14,7 @@ def safe_print(text):
     sys.stdout.flush()
 
 def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0.15):
-    """Pre-compute all corrupted chunks as numpy arrays (GPU-efficient preprocessing)."""
+    """Pre-compute all chunks. If mask_prob > 0, apply denoising corruption."""
     import numpy as np
     mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
     vocab_size = tokenizer.vocab_size
@@ -24,27 +24,29 @@ def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0
         tgt = np.array(encoded[i + 1:i + chunk_size + 1], dtype=np.int64)
         if len(chunk) != len(tgt) or len(chunk) < 2:
             continue
-        # Vectorized corruption (no Python loop)
-        mask_r = np.random.random(len(chunk))
-        type_r = np.random.random(len(chunk))
-        to_mask = mask_r < mask_prob
-        corrupted = chunk.copy()
-        replace_mask = to_mask & (type_r >= 0.8) & (type_r < 0.9)
-        corrupted[to_mask & (type_r < 0.8)] = mask_id
-        n_replace = replace_mask.sum()
-        if n_replace > 0:
-            corrupted[replace_mask] = np.random.randint(0, vocab_size, size=n_replace)
-        inputs.append(corrupted)
+        if mask_prob > 0:
+            mask_r = np.random.random(len(chunk))
+            type_r = np.random.random(len(chunk))
+            to_mask = mask_r < mask_prob
+            corrupted = chunk.copy()
+            corrupted[to_mask & (type_r < 0.8)] = mask_id
+            rep = to_mask & (type_r >= 0.8) & (type_r < 0.9)
+            n = rep.sum()
+            if n > 0:
+                corrupted[rep] = np.random.randint(0, vocab_size, size=n)
+            inputs.append(corrupted)
+        else:
+            inputs.append(chunk)
         targets.append(tgt)
     return inputs, targets
 
 
-def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_prob=0.15, epochs=3, batch_size=16):
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_prob=0.0, epochs=5, batch_size=16):
     """Batched GPU training: pre-compute chunks, process in mini-batches with gradient accumulation."""
     import torch
     print(f"\n{'='*60}")
     print(f"  GPU-OPTIMIZED TRAINING ON: {os.path.basename(filepath)}")
-    print(f"  {epochs} epochs | {chunk_size}-token chunks | stride {stride} | batch_size={batch_size}")
+    print(f"  {epochs} epochs | {chunk_size}-token chunks | stride {stride} | batch_size={batch_size} | {'denoising' if mask_prob > 0 else 'next-token'}")
     print(f"{'='*60}")
     
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
@@ -229,7 +231,7 @@ def main():
     
     # --- Book training ---
     if filepath and os.path.exists(filepath):
-        train_batched(model, tokenizer, filepath, epochs=epochs)
+        train_batched(model, tokenizer, filepath, mask_prob=0.0, epochs=epochs)
     
     # --- Save checkpoint if requested ---
     if save_path:
