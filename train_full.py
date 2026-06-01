@@ -77,6 +77,8 @@ def main():
     # Parse args
     filepath = None
     epochs = 3
+    save_path = None
+    load_path = None
     for i, arg in enumerate(sys.argv):
         if arg == '--train-file' and i + 1 < len(sys.argv):
             filepath = sys.argv[i + 1]
@@ -84,6 +86,10 @@ def main():
             try:
                 epochs = int(sys.argv[i + 1])
             except: pass
+        if arg == '--save' and i + 1 < len(sys.argv):
+            save_path = sys.argv[i + 1]
+        if arg == '--load' and i + 1 < len(sys.argv):
+            load_path = sys.argv[i + 1]
     
     print("=" * 60)
     print("  NERO — FULL GPU TRAINING")
@@ -159,16 +165,32 @@ def main():
         print(f"  Epoch {epoch+1}/5: {total} steps", flush=True)
     print("  Seed learning complete.")
     
+    # --- Load checkpoint if provided ---
+    if load_path and os.path.exists(load_path):
+        import torch
+        print(f"\n[4] Loading checkpoint: {load_path}...")
+        sd = torch.load(load_path, map_location=DEVICE, weights_only=True)
+        model.load_state_dict(sd)
+        print(f"    Loaded {sum(p.numel() for p in model.parameters()):,} params")
+    
     # --- Book training ---
     if filepath and os.path.exists(filepath):
         train_on_file(model, tokenizer, filepath, epochs=epochs)
+    
+    # --- Save checkpoint if requested ---
+    if save_path:
+        import torch
+        print(f"\n  Saving checkpoint to {save_path}...")
+        torch.save(model.state_dict(), save_path)
+        size_mb = os.path.getsize(save_path) / 1e6
+        print(f"    Saved ({size_mb:.0f} MB)")
     
     print(f"\n{'='*60}")
     print(f"  Training complete. Entering interactive mode.")
     print(f"{'='*60}")
     
     # --- Subsystems ---
-    print("\n[4] Loading subsystems...")
+    print("\n[5] Loading subsystems...")
     from safety_nets import SafetySystem
     from mortality import MortalitySystem
     from emotions import EmotionSystem
@@ -218,6 +240,8 @@ def main():
             print("  ask <q>         generate response")
             print("  teach <t>       learn from text")
             print("  train-file <p>  train on a text file")
+            print("  save <path>     save model checkpoint")
+            print("  load <path>     load model checkpoint")
             print("  sleep           consolidate")
             print("  state           mind state")
             print("  help / exit")
@@ -254,6 +278,26 @@ def main():
                 print(f"  Learned")
             continue
         
+        if cmd.startswith('save '):
+            spath = user_input[5:]
+            import torch
+            print(f"  Saving to {spath}...")
+            torch.save(model.state_dict(), spath)
+            print(f"    Done ({os.path.getsize(spath)/1e6:.0f} MB)")
+            continue
+
+        if cmd.startswith('load '):
+            lpath = user_input[5:]
+            if os.path.exists(lpath):
+                import torch
+                print(f"  Loading from {lpath}...")
+                sd = torch.load(lpath, map_location=DEVICE, weights_only=True)
+                model.load_state_dict(sd)
+                print(f"    Loaded {sum(p.numel() for p in model.parameters()):,} params")
+            else:
+                print(f"  Not found: {lpath}")
+            continue
+
         if cmd == 'sleep':
             model.consolidate_memory()
             print("  Consolidated")
