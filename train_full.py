@@ -67,9 +67,10 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
     if model._optimizer is None:
         model._create_optimizer()
     
-    # Set up optimizer with higher LR for bulk training
+    # Set up optimizer with higher LR for bulk training (main params only)
     for pg in model._optimizer.param_groups:
-        pg['lr'] = pg.get('_base_lr', 5e-5) * 2.0  # double LR for bulk
+        if pg.get('_base_lr', 5e-5) == 5e-5:  # main model params only
+            pg['lr'] = pg['_base_lr'] * 2.0
     
     device = model.device
     total_processed = 0
@@ -196,10 +197,8 @@ def main():
     p = sum(p.numel() for p in model.parameters())
     print(f"    {p:,} params ({p/1e6:.0f}M) on {DEVICE}")
     
-    # --- 5-epoch seed learning ---
+    # --- 5-epoch seed learning (plain next-token, no corruption) ---
     print(f"\n[3] Seed learning (5 epochs)...")
-    mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
-    vocab_size = tokenizer.vocab_size
     for epoch in range(5):
         total = 0
         for domain, text in SEED_TEXTS.items():
@@ -211,15 +210,11 @@ def main():
                 target = encoded[i+1:i+257]
                 if len(chunk) != len(target) or len(chunk) < 2:
                     continue
-                corrupted = chunk.copy()
-                for j in range(len(corrupted) - 1):
-                    if random.random() < 0.15:
-                        corrupted[j] = mask_id if random.random() < 0.8 else random.randint(0, vocab_size - 1)
-                model.learn_from_interaction(corrupted, target, value_label=0.3, task_type=domain)
+                model.learn_from_interaction(chunk, target, value_label=0.3, task_type=domain)
                 total += 1
             if epoch == 0:
-                print(f"    {domain}: complete", flush=True)
-        print(f"  Epoch {epoch+1}/5: {total} steps", flush=True)
+                print(f"    {domain}: complete ({len(encoded)} tokens)", flush=True)
+        print(f"  Epoch {epoch+1}/5: {total} steps, loss={model.loss_history[-1]:.4f}" if model.loss_history else f"  Epoch {epoch+1}/5: {total} steps", flush=True)
     print("  Seed learning complete.")
     
     # --- Load checkpoint if provided ---
