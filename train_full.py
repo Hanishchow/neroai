@@ -122,8 +122,26 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
         print(f"  Epoch {epoch+1}/{epochs} done: {n_chunks} chunks in {elapsed:.0f}s | avg_loss={avg_loss:.4f}")
     
     total_elapsed = time.time() - grand_start
+    avg_loss = epoch_loss / max(n_chunks * epochs, 1)
     print(f"  TOTAL: {n_chunks * epochs} chunks in {total_elapsed:.0f}s ({n_chunks * epochs / total_elapsed:.0f} ch/s)")
+    print(f"  FINAL AVG LOSS: {avg_loss:.4f} (should be < 6.7, lower = better)")
     print(f"{'='*60}")
+    
+    # Quick sanity check: generate something to see if model learned
+    model.eval()
+    print("\n  Sanity check — generating with prompt 'User: Hello'...")
+    test_ids = tokenizer.encode("User: Hello\n")
+    if len(test_ids) >= 2:
+        test_ids = test_ids[:model.max_context - 50 - 2]
+        gen = model.generate_human(test_ids, max_new_tokens=50, gestalt_temp=1.0, main_temp=0.5)
+        sample = tokenizer.decode(gen)[:200]
+        print(f"  Output: {sample}")
+        if all(c in ' \n\r\t' or 32 <= ord(c) <= 126 for c in sample[:50]):
+            print("  ✅ Model produces printable text")
+        else:
+            print("  ⚠️ Output contains non-printable chars")
+    model.train()
+    
     return n_chunks * epochs
 
 
