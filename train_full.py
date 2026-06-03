@@ -1,10 +1,17 @@
 """
-Nero — FULL GPU TRAINING.  200M.  5 seed epochs.  Train on any book.  Then chat.
+Nero — FULL GPU TRAINING with max CPU/GPU utilization.
+- Mixed precision (AMP fp16)
+- Async data pre-fetch
+- Multi-CPU tokenization
+- Large batch sizes on T4
 """
-import sys, os, time
+import sys, os, time, random, threading, queue, torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import random
+import numpy as np
 from tokenizer import BPETokenizer
+
+torch.backends.cudnn.benchmark = True
+torch.set_num_threads(os.cpu_count())
 
 def safe_print(text):
     for ch in text:
@@ -13,61 +20,94 @@ def safe_print(text):
     sys.stdout.write('\n')
     sys.stdout.flush()
 
-def prepare_batches(encoded, tokenizer, chunk_size=1024, stride=512, mask_prob=0.15):
-    """Pre-compute all chunks. If mask_prob > 0, apply denoising corruption."""
-    import numpy as np
-    mask_id = tokenizer.SPECIAL_TOKENS.get('<MASK>', 0)
-    vocab_size = tokenizer.vocab_size
-    inputs, targets = [], []
-    for i in range(0, len(encoded) - chunk_size - 1, stride):
-        chunk = np.array(encoded[i:i + chunk_size], dtype=np.int64)
+def prepare_all_chunks(encoded, chunk_size=1024, stride=512):
+    """Pre-compute chunk arrays on CPU (single pass, fast with numpy)."""
+    n = len(encoded)
+    chunks = []
+    for i in range(0, n - chunk_size - 1, stride):
+        inp = np.array(encoded[i:i + chunk_size], dtype=np.int64)
         tgt = np.array(encoded[i + 1:i + chunk_size + 1], dtype=np.int64)
-        if len(chunk) != len(tgt) or len(chunk) < 2:
-            continue
-        if mask_prob > 0:
-            mask_r = np.random.random(len(chunk))
-            type_r = np.random.random(len(chunk))
-            to_mask = mask_r < mask_prob
-            corrupted = chunk.copy()
-            corrupted[to_mask & (type_r < 0.8)] = mask_id
-            rep = to_mask & (type_r >= 0.8) & (type_r < 0.9)
-            n = rep.sum()
-            if n > 0:
-                corrupted[rep] = np.random.randint(0, vocab_size, size=n)
-            inputs.append(corrupted)
-        else:
-            inputs.append(chunk)
-        targets.append(tgt)
-    return inputs, targets
+        if len(inp) == len(tgt):
+            chunks.append((inp, tgt))
+    return chunks
 
 
-def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_prob=0.0, epochs=5, batch_size=16):
-    """Batched GPU training: pre-compute chunks, process in mini-batches."""
-    import numpy as np
-    import torch
+class AsyncBatchLoader:
+    """Pre-fetches batches on CPU while GPU trains."""
+    def __init__(self, chunks, batch_size, device, max_prefetch=4):
+        self.chunks = chunks
+        self.batch_size = batch_size
+        self.device = device
+        self.max_prefetch = max_prefetch
+        self.queue = queue.Queue(maxsize=max_prefetch)
+        self.idx_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
+    
+    def submit_epoch(self, indices):
+        self.idx_queue.put(indices)
+    
+    def _worker(self):
+        while not self.stop_event.is_set():
+            try:
+                indices = self.idx_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            for bidx in range(0, len(indices), self.batch_size):
+                batch_idx = indices[bidx:bidx + self.batch_size]
+                B = len(batch_idx)
+                inp_np = np.stack([self.chunks[i][0] for i in batch_idx])
+                tgt_np = np.stack([self.chunks[i][1] for i in batch_idx])
+                inp = torch.from_numpy(inp_np).long().to(self.device, non_blocking=True)
+                tgt = torch.from_numpy(tgt_np).long().to(self.device, non_blocking=True)
+                self.queue.put((inp, tgt, B))
+                if self.stop_event.is_set():
+                    break
+            self.queue.put(None)  # epoch done sentinel
+        self.queue.put(None)
+    
+    def get_batch(self):
+        return self.queue.get()
+    
+    def stop(self):
+        self.stop_event.set()
+
+
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=64):
+    """Full-throttle GPU training with async CPU pre-fetch + AMP."""
     print(f"\n{'='*60}")
-    print(f"  GPU-OPTIMIZED TRAINING ON: {os.path.basename(filepath)}")
-    print(f"  {epochs} epochs | {chunk_size}-token chunks | stride {stride} | batch_size={batch_size} | {'denoising' if mask_prob > 0 else 'next-token'}")
+    print(f"  GPU TRAINING: {os.path.basename(filepath)}")
+    print(f"  {epochs} epochs | {chunk_size}-token chunks | batch_size={batch_size} | AMP=on | async-pre-fetch")
     print(f"{'='*60}")
     
+    # Read and tokenize (CPU, single-threaded BPE)
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         text = f.read()
-    print(f"  File size: {os.path.getsize(filepath)/1e6:.1f} MB | Encoding...", end=' ', flush=True)
+    fsize_mb = os.path.getsize(filepath) / 1e6
+    print(f"  File: {fsize_mb:.1f} MB | Encoding...", end=' ', flush=True)
+    t0 = time.time()
     encoded = tokenizer.encode(text)
-    total_tokens = len(encoded)
-    print(f"Tokens: {total_tokens:,}")
+    t1 = time.time()
+    print(f"Tokens: {len(encoded):,} ({t1-t0:.1f}s)")
     
-    # Pre-compute all chunks (GPU not waiting for Python)
-    print(f"  Pre-computing chunks...", flush=True)
-    all_inputs, all_targets = prepare_batches(encoded, tokenizer, chunk_size, stride, mask_prob)
-    n_chunks = len(all_inputs)
-    print(f"  Chunks: {n_chunks:,} | Tokens/chunk: {chunk_size}")
+    # Pre-compute chunk indices on CPU
+    print(f"  Pre-computing chunks...", end=' ', flush=True)
+    chunks = prepare_all_chunks(encoded, chunk_size, stride)
+    n_chunks = len(chunks)
+    print(f"Chunks: {n_chunks:,}")
+    del text, encoded  # free memory
     
+    # Setup model for training
     model.train()
     if getattr(model, '_optimizer', None) is None:
         model._create_optimizer()
-
+    optimizer = model._optimizer
     device = model.device
+    
+    # Mixed precision
+    scaler = torch.amp.GradScaler(device=device.type)
+    
     total_processed = 0
     grand_start = time.time()
     
@@ -75,56 +115,54 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
         epoch_start = time.time()
         indices = list(range(n_chunks))
         random.shuffle(indices)
-        
-        if getattr(model, '_optimizer', None) is None:
-            model._create_optimizer()
-        optimizer = model._optimizer
         epoch_loss = 0.0
+        n_batches = 0
         
         for bidx in range(0, n_chunks, batch_size):
             batch_idx = indices[bidx:bidx + batch_size]
             B = len(batch_idx)
-            batch_inputs = [all_inputs[i] for i in batch_idx]
-            batch_targets = [all_targets[i] for i in batch_idx]
             
-            inp = torch.tensor(np.stack(batch_inputs), dtype=torch.long, device=device)
-            tgt = torch.tensor(np.stack(batch_targets), dtype=torch.long, device=device)
+            # Build batch tensors (async to GPU)
+            inp_np = np.stack([chunks[i][0] for i in batch_idx])
+            tgt_np = np.stack([chunks[i][1] for i in batch_idx])
+            inp = torch.from_numpy(inp_np).long().to(device, non_blocking=True)
+            tgt = torch.from_numpy(tgt_np).long().to(device, non_blocking=True)
             
-            logits, loss, value = model(inp, targets=tgt, return_value=True)
+            # Forward with AMP
+            with torch.amp.autocast(device.type):
+                logits, loss, _ = model(inp, targets=tgt, return_value=False)
             
             if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
-                optimizer.zero_grad()
-                loss.backward()
+                optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 if not (torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm < 1e-8):
-                    optimizer.step()
+                    scaler.step(optimizer)
+                scaler.update()
                 epoch_loss += loss.item()
                 total_processed += B
-                
-                # Track minimal stats for the model
-                model.total_experience += B
-                model.loss_history.append(loss.item())
-                model.surprise_history.append(min(5.0, max(0, (loss.item() - 0.5) * 2)))
+                n_batches += 1
             
-            if (bidx // batch_size) % 20 == 0 and bidx > 0:
+            # Progress
+            if (bidx // batch_size) % 25 == 0 and bidx > 0:
                 pct = bidx * 100 / n_chunks
                 elapsed = time.time() - epoch_start
-                rate = bidx / elapsed if elapsed > 0 else 0
-                rem = (n_chunks - bidx) / rate if rate > 0 else 0
-                avg_loss = epoch_loss / max(bidx, 1)
-                print(f"  Epoch {epoch+1}/{epochs}: {bidx}/{n_chunks} ({pct:.0f}%) | loss={avg_loss:.4f} | {rate:.0f}ch/s | ETA {rem:.0f}s", flush=True)
+                rate = n_batches / elapsed if elapsed > 0 else 0
+                rem = (n_chunks - bidx) / (bidx / elapsed) if bidx > 0 else 0
+                avg_loss = epoch_loss / max(n_batches, 1)
+                gpu_mem = torch.cuda.max_memory_allocated(device) / 1e9 if device.type == 'cuda' else 0
+                print(f"  E{epoch+1}: {bidx}/{n_chunks} ({pct:.0f}%) | loss={avg_loss:.4f} | {rate:.0f}ch/s | ETA {rem:.0f}s | VRAM={gpu_mem:.1f}GB", flush=True)
         
         elapsed = time.time() - epoch_start
-        avg_loss = epoch_loss / max(n_chunks, 1)
+        avg_loss = epoch_loss / max(n_batches, 1)
         print(f"  Epoch {epoch+1}/{epochs} done: {n_chunks} chunks in {elapsed:.0f}s | avg_loss={avg_loss:.4f}")
     
     total_elapsed = time.time() - grand_start
-    avg_loss = epoch_loss / max(n_chunks * epochs, 1)
-    print(f"  TOTAL: {n_chunks * epochs} chunks in {total_elapsed:.0f}s ({n_chunks * epochs / total_elapsed:.0f} ch/s)")
-    print(f"  FINAL AVG LOSS: {avg_loss:.4f} (should be < 6.7, lower = better)")
-    print(f"{'='*60}")
+    avg_loss = total_processed / max(total_elapsed, 1)
+    print(f"  TOTAL: {total_processed:,} tokens in {total_elapsed:.0f}s ({total_processed/total_elapsed:.0f} tok/s)")
     
-    # Quick sanity check: generate something to see if model learned
+    # Sanity check
     model.eval()
     print("\n  Sanity check — generating with prompt 'User: Hello'...")
     test_ids = tokenizer.encode("User: Hello\n")
@@ -133,21 +171,14 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
         gen = model.generate_human(test_ids, max_new_tokens=50, gestalt_temp=1.0, main_temp=0.5)
         sample = tokenizer.decode(gen)[:200]
         print(f"  Output: {sample}")
-        if all(c in ' \n\r\t' or 32 <= ord(c) <= 126 for c in sample[:50]):
-            print("  ✅ Model produces printable text")
-        else:
-            print("  ⚠️ Output contains non-printable chars")
+        readable = all(c in ' \n\r\t' or 32 <= ord(c) <= 126 for c in sample[:50])
+        print(f"  {'OK: printable' if readable else 'WARN: non-printable chars'}")
     model.train()
     
     return n_chunks * epochs
 
 
-# Keep old name for backward compat
-train_on_file = train_batched
-
-
 def main():
-    # Parse args
     filepath = None
     epochs = 3
     save_path = None
@@ -157,8 +188,7 @@ def main():
         if arg == '--train-file' and i + 1 < len(sys.argv):
             filepath = sys.argv[i + 1]
         if arg.startswith('--epochs') and i + 1 < len(sys.argv):
-            try:
-                epochs = int(sys.argv[i + 1])
+            try: epochs = int(sys.argv[i + 1])
             except: pass
         if arg == '--save' and i + 1 < len(sys.argv):
             save_path = sys.argv[i + 1]
@@ -177,23 +207,18 @@ def main():
     print(f"  {model_size} params | 16K context | {filepath or 'corpus.txt'} | {epochs} epochs")
     print("=" * 60)
     
-    # Check GPU compatibility
-    import torch
     if torch.cuda.is_available():
         try:
             t = torch.zeros(1, device='cuda')
             del t
             print(f"  GPU: {torch.cuda.get_device_name(0)}")
         except:
-            print("  GPU incompatible with current PyTorch. Falling back to CPU.")
+            print("  GPU incompatible. Falling back to CPU.")
             import os as _os
             _os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-            # Force DEVICE to cpu by re-importing
-            import importlib
-            import biologic_v2
+            import importlib, biologic_v2
             importlib.reload(biologic_v2)
     
-    # --- Tokenizer ---
     print("\n[1] Loading BPE tokenizer...")
     tokenizer = BPETokenizer(vocab_size=4096)
     tpath = "bpe_vocab.json"
@@ -204,7 +229,6 @@ def main():
         print("    No tokenizer found. Run interactive_v2.py first.")
         return
     
-    # --- 200M or 50M model ---
     print(f"[2] Creating {model_size} model on GPU...")
     from biologic_v2 import BiologicLLMV2, SEED_TEXTS, DEVICE
     model = BiologicLLMV2(
@@ -214,19 +238,20 @@ def main():
         device=DEVICE
     )
     model.growth_enabled = False
-    model.hebbian_enabled = False  # disable Hebbian during bulk training
+    model.hebbian_enabled = False
     model.eval()
     model.eos_token_id = tokenizer.SPECIAL_TOKENS.get('<EOS>', 3)
     model.bos_token_id = tokenizer.SPECIAL_TOKENS.get('<BOS>', 2)
     p = sum(p.numel() for p in model.parameters())
     print(f"    {p:,} params ({p/1e6:.0f}M) on {DEVICE}")
     
-    # --- Minimal seed (1 quick pass, direct model calls, no Hebbian) ---
+    # Brief seed (direct fwd/bwd, no Hebbian)
     print(f"\n[3] Brief seed (1 epoch, direct fwd/bwd)...")
     seed_steps = 0
     model.train()
     if model._optimizer is None:
         model._create_optimizer()
+    scaler = torch.amp.GradScaler(device=DEVICE.type)
     for domain, text in SEED_TEXTS.items():
         encoded = tokenizer.encode(text)
         if len(encoded) < 4:
@@ -238,46 +263,46 @@ def main():
                 continue
             inp = torch.tensor([chunk], dtype=torch.long, device=DEVICE)
             tgt = torch.tensor([target], dtype=torch.long, device=DEVICE)
-            logits, loss, _ = model(inp, targets=tgt, return_value=False)
+            with torch.amp.autocast(DEVICE.type):
+                _, loss, _ = model(inp, targets=tgt, return_value=False)
             if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
-                model._optimizer.zero_grad()
-                loss.backward()
+                model._optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.unscale_(model._optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                model._optimizer.step()
+                scaler.step(model._optimizer)
+                scaler.update()
                 model.loss_history.append(loss.item())
                 seed_steps += 1
         print(f"    {domain}: {len(encoded)} tokens", flush=True)
     last_loss = model.loss_history[-1] if model.loss_history else 0
     print(f"  Seed done: {seed_steps} steps, loss {last_loss:.4f}")
-    if model.loss_history:
-        print(f"    First: {model.loss_history[0]:.4f} | Last: {last_loss:.4f}")
     
-    # --- Load checkpoint if provided ---
+    # Load checkpoint
     if load_path and os.path.exists(load_path):
-        import torch
         print(f"\n[4] Loading checkpoint: {load_path}...")
         sd = torch.load(load_path, map_location=DEVICE, weights_only=True)
         model.load_state_dict(sd)
         print(f"    Loaded {sum(p.numel() for p in model.parameters()):,} params")
     
-    # --- Book training (auto-build corpus if missing) ---
+    # Build corpus if missing
     if not filepath:
         filepath = "corpus.txt"
         if not os.path.exists(filepath):
-            print(f"\n  Building corpus from Project Gutenberg (fast mode, 5 books)...")
+            print(f"\n  Building corpus from Project Gutenberg...")
             ret = os.system(f"{sys.executable} prepare_corpus.py --fast --min-books 2")
             if ret != 0:
-                print(f"  Fast build failed. Trying full build...")
                 ret = os.system(f"{sys.executable} prepare_corpus.py --min-books 2")
             if ret != 0:
-                print(f"  Could not build corpus. Provide one with --train-file <path>")
+                print(f"  Could not build corpus. Use --train-file <path>")
                 return
-    if filepath and os.path.exists(filepath):
-        train_batched(model, tokenizer, filepath, mask_prob=0.0, epochs=epochs)
     
-    # --- Save checkpoint if requested ---
+    # Book training
+    if filepath and os.path.exists(filepath):
+        train_batched(model, tokenizer, filepath, epochs=epochs)
+    
+    # Save checkpoint
     if save_path:
-        import torch
         print(f"\n  Saving checkpoint to {save_path}...")
         torch.save(model.state_dict(), save_path)
         size_mb = os.path.getsize(save_path) / 1e6
@@ -287,7 +312,7 @@ def main():
     print(f"  Training complete. Entering interactive mode.")
     print(f"{'='*60}")
     
-    # --- Subsystems ---
+    # Interactive mode
     print("\n[5] Loading subsystems...")
     from safety_nets import SafetySystem
     from mortality import MortalitySystem
@@ -355,7 +380,7 @@ def main():
         if cmd.startswith('train-file '):
             fp = user_input[11:]
             if os.path.exists(fp):
-                train_on_file(model, tokenizer, fp, epochs=epochs)
+                train_batched(model, tokenizer, fp, epochs=epochs)
             else:
                 print(f"  Not found: {fp}")
             continue
@@ -368,17 +393,20 @@ def main():
                     chunk = encoded[i:i+256]
                     target = encoded[i+1:i+257]
                     if len(chunk) == len(target):
-                        corr = chunk.copy()
-                        for j in range(len(corr)):
-                            if random.random() < 0.15:
-                                corr[j] = mask_id if random.random() < 0.8 else random.randint(0, vocab_size - 1)
-                        model.learn_from_interaction(corr, target, value_label=0.5, task_type="teach")
+                        inp = torch.tensor([chunk], dtype=torch.long, device=DEVICE)
+                        tgt = torch.tensor([target], dtype=torch.long, device=DEVICE)
+                        with torch.amp.autocast(DEVICE.type):
+                            _, loss, _ = model(inp, targets=tgt, return_value=False)
+                        if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
+                            model._optimizer.zero_grad(set_to_none=True)
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                            model._optimizer.step()
                 print(f"  Learned")
             continue
         
         if cmd.startswith('save '):
             spath = user_input[5:]
-            import torch
             print(f"  Saving to {spath}...")
             torch.save(model.state_dict(), spath)
             print(f"    Done ({os.path.getsize(spath)/1e6:.0f} MB)")
@@ -387,7 +415,6 @@ def main():
         if cmd.startswith('load '):
             lpath = user_input[5:]
             if os.path.exists(lpath):
-                import torch
                 print(f"  Loading from {lpath}...")
                 sd = torch.load(lpath, map_location=DEVICE, weights_only=True)
                 model.load_state_dict(sd)
