@@ -32,7 +32,7 @@ def prepare_all_chunks(encoded, chunk_size=1024, stride=512):
     return chunks
 
 
-def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=64):
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=16):
     """Full-throttle GPU training with async CPU pre-fetch + AMP."""
     print(f"\n{'='*60}")
     print(f"  GPU TRAINING: {os.path.basename(filepath)}")
@@ -43,6 +43,18 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epoch
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         text = f.read()
     fsize_mb = os.path.getsize(filepath) / 1e6
+    
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        # Clear cached attention masks from previous runs
+        for block in model.blocks:
+            if hasattr(block.attention, '_mask_cache'):
+                block.attention._mask_cache.clear()
+            if hasattr(block.attention, '_rel_cache'):
+                block.attention._rel_cache.clear()
+        free, total = torch.cuda.mem_get_info()
+        print(f"  GPU: {torch.cuda.get_device_name(0)} | {(total-free)/1e9:.1f}/{total/1e9:.1f} GiB used")
+    
     print(f"  File: {fsize_mb:.1f} MB | Encoding...", end=' ', flush=True)
     t0 = time.time()
     encoded = tokenizer.encode(text)
@@ -235,6 +247,12 @@ def main():
         print(f"    {domain}: {len(encoded)} tokens", flush=True)
     last_loss = model.loss_history[-1] if model.loss_history else 0
     print(f"  Seed done: {seed_steps} steps, loss {last_loss:.4f}")
+    
+    # Free seed memory before main training
+    if DEVICE.type == 'cuda':
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        print(f"  GPU memory: {(total-free)/1e9:.1f}/{total/1e9:.1f} GiB used")
     
     # Load checkpoint
     if load_path and os.path.exists(load_path):
