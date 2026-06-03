@@ -44,6 +44,13 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epoch
         text = f.read()
     fsize_mb = os.path.getsize(filepath) / 1e6
     
+    # Setup model for training (need device early for CUDA cache cleanup)
+    model.train()
+    if getattr(model, '_optimizer', None) is None:
+        model._create_optimizer()
+    optimizer = model._optimizer
+    device = model.device
+    
     if device.type == 'cuda':
         torch.cuda.empty_cache()
         # Clear cached attention masks from previous runs
@@ -67,13 +74,6 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epoch
     n_chunks = len(chunks)
     print(f"Chunks: {n_chunks:,}")
     del text, encoded  # free memory
-    
-    # Setup model for training
-    model.train()
-    if getattr(model, '_optimizer', None) is None:
-        model._create_optimizer()
-    optimizer = model._optimizer
-    device = model.device
     
     # Mixed precision
     scaler = torch.amp.GradScaler(device=device.type)
