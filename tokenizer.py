@@ -118,24 +118,23 @@ class BPETokenizer:
         # Start with character-level tokens
         tokens = [self.char_level_vocab.get(c, self.SPECIAL_TOKENS['<UNK>']) for c in word]
         
-        # Greedily apply merges
+        # Greedily apply merges using O(1) dict lookup
+        # Instead of sorting merges every time, scan left-to-right
+        # applying any applicable merge immediately.
         changed = True
         while changed:
             changed = False
-            # Find the lowest-priority merge that applies first
-            # (We apply merges in the order they were learned)
-            for pair, new_id in sorted(self.merges.items(), key=lambda x: x[1]):
-                i = 0
-                new_tokens = []
-                while i < len(tokens):
-                    if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) == pair:
-                        new_tokens.append(new_id)
-                        i += 2
-                        changed = True
-                    else:
-                        new_tokens.append(tokens[i])
-                        i += 1
-                tokens = new_tokens
+            i = 0
+            new_tokens = []
+            while i < len(tokens):
+                if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) in self.merges:
+                    new_tokens.append(self.merges[(tokens[i], tokens[i+1])])
+                    i += 2
+                    changed = True
+                else:
+                    new_tokens.append(tokens[i])
+                    i += 1
+            tokens = new_tokens
         
         return tokens
     
