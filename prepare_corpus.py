@@ -11,7 +11,6 @@ BOOKS = [
     (1342, "Pride and Prejudice"),
     (2701, "Moby Dick"),
     (1400, "Great Expectations"),
-    (11,   "Alice in Wonderland"),
     (76,   "Huckleberry Finn"),
     (84,   "Frankenstein"),
     (345,  "Dracula"),
@@ -19,13 +18,11 @@ BOOKS = [
     (98,   "A Tale of Two Cities"),
     (730,  "Oliver Twist"),
     (174,  "The Picture of Dorian Gray"),
-    (43,   "The Strange Case of Dr Jekyll and Mr Hyde"),
+    (43,   "Dr Jekyll and Mr Hyde"),
     (1663, "Around the World in 80 Days"),
     (2814, "The Republic"),
     (1232, "The Prince"),
-    (135,  "Les Miserables"),
     (1250, "The Scarlet Letter"),
-    (21700, "The Elements of Style"),
     (5827, "The Art of War"),
 ]
 
@@ -52,11 +49,13 @@ def clean_text(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-def download_book(book_id, title, output_dir, timeout=90):
+def download_book(book_id, title, output_dir, timeout=15):
     """Download a single book; returns (filename, char_count) or None."""
-    url = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
-    alt_urls = [url, f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt",
-                f"https://www.gutenberg.org/ebooks/{book_id}.txt.utf-8"]
+    alt_urls = [
+        f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt",
+        f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt",
+        f"https://www.gutenberg.org/ebooks/{book_id}.txt.utf-8",
+    ]
     fpath = os.path.join(output_dir, f"book_{book_id}.txt")
     
     for attempt, u in enumerate(alt_urls):
@@ -67,19 +66,32 @@ def download_book(book_id, title, output_dir, timeout=90):
             stripped = strip_gutenberg(raw)
             cleaned = clean_text(stripped)
             if len(cleaned) < 500:
-                print(f"    ! {title}: too short ({len(cleaned)} chars), next URL")
                 continue
             with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(cleaned)
             return fpath, len(cleaned)
-        except Exception as e:
-            msg = str(e).split('.')[-1].strip()[:60]
-            print(f"    ! {title}: url #{attempt+1} failed ({msg})")
+        except Exception:
+            pass
+    # Try one more time with longer timeout
+    try:
+        u = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
+        req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode('utf-8', errors='replace')
+        stripped = strip_gutenberg(raw)
+        cleaned = clean_text(stripped)
+        if len(cleaned) >= 500:
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(cleaned)
+            return fpath, len(cleaned)
+    except Exception:
+        pass
     return None, 0
 
 def main():
     output = "corpus.txt"
     min_books = 3
+    fast = False
     
     args = sys.argv[1:]
     for i, a in enumerate(args):
@@ -88,19 +100,23 @@ def main():
         if a == '--min-books' and i+1 < len(args):
             try: min_books = int(args[i+1])
             except: pass
+        if a == '--fast':
+            fast = True
+    
+    books = BOOKS[:5] if fast else BOOKS
 
     tmpdir = "gutenberg_raw"
     os.makedirs(tmpdir, exist_ok=True)
     
-    print(f"Downloading {len(BOOKS)} classic books to build training corpus...\n")
+    print(f"Downloading {len(books)} classic books to build training corpus...\n")
     
     all_text = []
     succeeded = 0
     total_chars = 0
     
-    for book_id, title in BOOKS:
+    for book_id, title in books:
         print(f"  [{book_id:5d}] {title}...", end=' ', flush=True)
-        fpath, chars = download_book(book_id, title, tmpdir, timeout=90)
+        fpath, chars = download_book(book_id, title, tmpdir)
         if fpath and chars > 0:
             with open(fpath, 'r', encoding='utf-8') as f:
                 all_text.append(f.read())

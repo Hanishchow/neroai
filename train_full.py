@@ -264,8 +264,11 @@ def main():
     if not filepath:
         filepath = "corpus.txt"
         if not os.path.exists(filepath):
-            print(f"\n  'corpus.txt' not found. Building from Project Gutenberg...")
-            ret = os.system(f"{sys.executable} prepare_corpus.py --min-books 3")
+            print(f"\n  Building corpus from Project Gutenberg (fast mode, 5 books)...")
+            ret = os.system(f"{sys.executable} prepare_corpus.py --fast --min-books 2")
+            if ret != 0:
+                print(f"  Fast build failed. Trying full build...")
+                ret = os.system(f"{sys.executable} prepare_corpus.py --min-books 2")
             if ret != 0:
                 print(f"  Could not build corpus. Provide one with --train-file <path>")
                 return
