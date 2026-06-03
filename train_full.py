@@ -64,14 +64,9 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
     print(f"  Chunks: {n_chunks:,} | Tokens/chunk: {chunk_size}")
     
     model.train()
-    if model._optimizer is None:
+    if getattr(model, '_optimizer', None) is None:
         model._create_optimizer()
-    
-    # Set up optimizer with higher LR for bulk training (main params only)
-    for pg in model._optimizer.param_groups:
-        if pg.get('_base_lr', 5e-5) == 5e-5:  # main model params only
-            pg['lr'] = pg['_base_lr'] * 2.0
-    
+
     device = model.device
     total_processed = 0
     grand_start = time.time()
@@ -81,6 +76,8 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
         indices = list(range(n_chunks))
         random.shuffle(indices)
         
+        if getattr(model, '_optimizer', None) is None:
+            model._create_optimizer()
         optimizer = model._optimizer
         epoch_loss = 0.0
         
@@ -98,7 +95,7 @@ def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, mask_
             if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
                 optimizer.zero_grad()
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 if not (torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm < 1e-8):
                     optimizer.step()
                 epoch_loss += loss.item()
@@ -155,6 +152,7 @@ def main():
     epochs = 3
     save_path = None
     load_path = None
+    small = False
     for i, arg in enumerate(sys.argv):
         if arg == '--train-file' and i + 1 < len(sys.argv):
             filepath = sys.argv[i + 1]
@@ -166,10 +164,17 @@ def main():
             save_path = sys.argv[i + 1]
         if arg == '--load' and i + 1 < len(sys.argv):
             load_path = sys.argv[i + 1]
+        if arg == '--small':
+            small = True
+    
+    embed_dim = 688 if small else 1408
+    num_heads = 8
+    num_layers = 8
+    model_size = "50M" if small else "200M"
     
     print("=" * 60)
-    print("  NERO — FULL GPU TRAINING")
-    print("  200M params | 16K context | 5 seed epochs + book training")
+    print(f"  NERO — FULL GPU TRAINING")
+    print(f"  {model_size} params | 16K context | {filepath or 'corpus.txt'} | {epochs} epochs")
     print("=" * 60)
     
     # Check GPU compatibility
@@ -199,41 +204,53 @@ def main():
         print("    No tokenizer found. Run interactive_v2.py first.")
         return
     
-    # --- 200M model ---
-    print("[2] Creating 200M model on GPU...")
+    # --- 200M or 50M model ---
+    print(f"[2] Creating {model_size} model on GPU...")
     from biologic_v2 import BiologicLLMV2, SEED_TEXTS, DEVICE
     model = BiologicLLMV2(
         vocab_size=tokenizer.vocab_size,
-        embed_dim=1408, num_heads=8, num_layers=8,
+        embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers,
         max_context=16384, window_size=1024, dropout=0.1,
         device=DEVICE
     )
     model.growth_enabled = False
+    model.hebbian_enabled = False  # disable Hebbian during bulk training
     model.eval()
     model.eos_token_id = tokenizer.SPECIAL_TOKENS.get('<EOS>', 3)
     model.bos_token_id = tokenizer.SPECIAL_TOKENS.get('<BOS>', 2)
     p = sum(p.numel() for p in model.parameters())
     print(f"    {p:,} params ({p/1e6:.0f}M) on {DEVICE}")
     
-    # --- 5-epoch seed learning (plain next-token, no corruption) ---
-    print(f"\n[3] Seed learning (5 epochs)...")
-    for epoch in range(5):
-        total = 0
-        for domain, text in SEED_TEXTS.items():
-            encoded = tokenizer.encode(text)
-            if len(encoded) < 4:
+    # --- Minimal seed (1 quick pass, direct model calls, no Hebbian) ---
+    print(f"\n[3] Brief seed (1 epoch, direct fwd/bwd)...")
+    seed_steps = 0
+    model.train()
+    if model._optimizer is None:
+        model._create_optimizer()
+    for domain, text in SEED_TEXTS.items():
+        encoded = tokenizer.encode(text)
+        if len(encoded) < 4:
+            continue
+        for i in range(0, len(encoded) - 256 - 1, 128):
+            chunk = encoded[i:i+256]
+            target = encoded[i+1:i+257]
+            if len(chunk) != len(target) or len(chunk) < 2:
                 continue
-            for i in range(0, len(encoded) - 256 - 1, 128):
-                chunk = encoded[i:i+256]
-                target = encoded[i+1:i+257]
-                if len(chunk) != len(target) or len(chunk) < 2:
-                    continue
-                model.learn_from_interaction(chunk, target, value_label=0.3, task_type=domain)
-                total += 1
-            if epoch == 0:
-                print(f"    {domain}: complete ({len(encoded)} tokens)", flush=True)
-        print(f"  Epoch {epoch+1}/5: {total} steps, loss={model.loss_history[-1]:.4f}" if model.loss_history else f"  Epoch {epoch+1}/5: {total} steps", flush=True)
-    print("  Seed learning complete.")
+            inp = torch.tensor([chunk], dtype=torch.long, device=DEVICE)
+            tgt = torch.tensor([target], dtype=torch.long, device=DEVICE)
+            logits, loss, _ = model(inp, targets=tgt, return_value=False)
+            if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
+                model._optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                model._optimizer.step()
+                model.loss_history.append(loss.item())
+                seed_steps += 1
+        print(f"    {domain}: {len(encoded)} tokens", flush=True)
+    last_loss = model.loss_history[-1] if model.loss_history else 0
+    print(f"  Seed done: {seed_steps} steps, loss {last_loss:.4f}")
+    if model.loss_history:
+        print(f"    First: {model.loss_history[0]:.4f} | Last: {last_loss:.4f}")
     
     # --- Load checkpoint if provided ---
     if load_path and os.path.exists(load_path):
@@ -243,7 +260,15 @@ def main():
         model.load_state_dict(sd)
         print(f"    Loaded {sum(p.numel() for p in model.parameters()):,} params")
     
-    # --- Book training ---
+    # --- Book training (auto-build corpus if missing) ---
+    if not filepath:
+        filepath = "corpus.txt"
+        if not os.path.exists(filepath):
+            print(f"\n  'corpus.txt' not found. Building from Project Gutenberg...")
+            ret = os.system(f"{sys.executable} prepare_corpus.py --min-books 3")
+            if ret != 0:
+                print(f"  Could not build corpus. Provide one with --train-file <path>")
+                return
     if filepath and os.path.exists(filepath):
         train_batched(model, tokenizer, filepath, mask_prob=0.0, epochs=epochs)
     

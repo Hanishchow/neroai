@@ -354,6 +354,7 @@ class BiologicLLMV2(nn.Module):
 
         self._optimizer = None
         self._nan_streak = 0
+        self.hebbian_enabled = True
 
         self.task_profiles = {}
 
@@ -647,8 +648,8 @@ class BiologicLLMV2(nn.Module):
 
                 self._optimizer.zero_grad()
                 total_loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 0.5)
-                if torch.isnan(grad_norm) or grad_norm > 10 or grad_norm < 1e-8:
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
+                if torch.isnan(grad_norm) or grad_norm < 1e-8:
                     self._optimizer.zero_grad()
                     # Reset meta-params to safe defaults if they corrupted
                     self._nan_streak += 1
@@ -676,19 +677,20 @@ class BiologicLLMV2(nn.Module):
                 self._nan_streak = 0
                 self._optimizer.step()
 
-                # Hebbian updates with adaptive plasticity per synapse
-                for block in self.blocks:
-                    for module in block.modules():
-                        if isinstance(module, PlasticSynapse) and hasattr(module, 'trace_pre'):
-                            pre = module.trace_pre
-                            post = module.trace_post
-                            if pre is not None and post is not None and pre.dim() == 1 and post.dim() == 1:
-                                if pre.norm() > 0 and post.norm() > 0:
-                                    module.hebbian_update(
-                                        pre.unsqueeze(0), post.unsqueeze(0),
-                                        surprise=surprise, input_activity=module.trace_activation,
-                                        task_bias=task_bias
-                                    )
+                # Hebbian updates (gated — disabled during bulk training)
+                if self.hebbian_enabled:
+                    for block in self.blocks:
+                        for module in block.modules():
+                            if isinstance(module, PlasticSynapse) and hasattr(module, 'trace_pre'):
+                                pre = module.trace_pre
+                                post = module.trace_post
+                                if pre is not None and post is not None and pre.dim() == 1 and post.dim() == 1:
+                                    if pre.norm() > 0 and post.norm() > 0:
+                                        module.hebbian_update(
+                                            pre.unsqueeze(0), post.unsqueeze(0),
+                                            surprise=surprise, input_activity=module.trace_activation,
+                                            task_bias=task_bias
+                                        )
 
                 self.experience_buffer.append({
                     'loss': loss.item(),
@@ -743,7 +745,7 @@ class BiologicLLMV2(nn.Module):
 
     def _create_optimizer(self):
         """Create AdamW with separate high-LR group for differentiable meta-params."""
-        base_lr = 5e-5
+        base_lr = 3e-4
         meta_keywords = ['meta_base', 'meta_gate', 'meta_surprise_scale', 'meta_decay', 'meta_act_scale', 'task_embedding', 'task_projection']
         meta_params = []
         model_params = []
