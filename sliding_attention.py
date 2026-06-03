@@ -47,9 +47,9 @@ class SlidingWindowAttention(nn.Module):
         B, T, C = x.shape
         W = min(self.window_size, T)
 
-        Q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.k_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        Q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        K = self.k_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        V = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
         # SDPA dropout=0 during training — model has its own Dropout layers.
         # Dropout in SDPA disables Flash Attention on T4 (sm_75), causing OOM.

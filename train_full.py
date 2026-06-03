@@ -10,8 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from tokenizer import BPETokenizer
 
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
 torch.backends.cudnn.benchmark = True
 torch.set_num_threads(os.cpu_count())
+# Force Flash Attention; disable math SDP fallback (O(T²) memory)
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
 
 def safe_print(text):
     for ch in text:
@@ -32,7 +36,7 @@ def prepare_all_chunks(encoded, chunk_size=1024, stride=512):
     return chunks
 
 
-def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=32):
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=4):
     """Full-throttle GPU training with async CPU pre-fetch + AMP."""
     print(f"\n{'='*60}")
     print(f"  GPU TRAINING: {os.path.basename(filepath)}")
