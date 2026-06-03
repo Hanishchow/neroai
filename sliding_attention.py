@@ -51,15 +51,24 @@ class SlidingWindowAttention(nn.Module):
         K = self.k_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         V = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        sliding_mask = self._make_sliding_mask(T, W, x.device)
-
-        attn_output = F.scaled_dot_product_attention(
-            Q, K, V,
-            attn_mask=sliding_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=False,
-            scale=self.scale
-        )
+        if T <= W:
+            # Window covers full sequence → efficient Flash Attention with causal mask
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+                scale=self.scale
+            )
+        else:
+            # Sliding window: use boolean mask (slower but memory-bound is OK for large T)
+            sliding_mask = self._make_sliding_mask(T, W, x.device)
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V,
+                attn_mask=sliding_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=False,
+                scale=self.scale
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(attn_output)

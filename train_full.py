@@ -32,11 +32,11 @@ def prepare_all_chunks(encoded, chunk_size=1024, stride=512):
     return chunks
 
 
-def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=16):
+def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=32):
     """Full-throttle GPU training with async CPU pre-fetch + AMP."""
     print(f"\n{'='*60}")
     print(f"  GPU TRAINING: {os.path.basename(filepath)}")
-    print(f"  {epochs} epochs | {chunk_size}-token chunks | batch_size={batch_size} | AMP=on | async-pre-fetch")
+    print(f"  {epochs} epochs | {chunk_size}-token chunks | batch_size={batch_size} | AMP=on | FlashAttn")
     print(f"{'='*60}")
     
     # Read and tokenize (CPU, single-threaded BPE)
