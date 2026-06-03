@@ -5,7 +5,7 @@ Nero — FULL GPU TRAINING with max CPU/GPU utilization.
 - Multi-CPU tokenization
 - Large batch sizes on T4
 """
-import sys, os, time, random, threading, queue, torch
+import sys, os, time, random, torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from tokenizer import BPETokenizer
@@ -30,48 +30,6 @@ def prepare_all_chunks(encoded, chunk_size=1024, stride=512):
         if len(inp) == len(tgt):
             chunks.append((inp, tgt))
     return chunks
-
-
-class AsyncBatchLoader:
-    """Pre-fetches batches on CPU while GPU trains."""
-    def __init__(self, chunks, batch_size, device, max_prefetch=4):
-        self.chunks = chunks
-        self.batch_size = batch_size
-        self.device = device
-        self.max_prefetch = max_prefetch
-        self.queue = queue.Queue(maxsize=max_prefetch)
-        self.idx_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        self.worker = threading.Thread(target=self._worker, daemon=True)
-        self.worker.start()
-    
-    def submit_epoch(self, indices):
-        self.idx_queue.put(indices)
-    
-    def _worker(self):
-        while not self.stop_event.is_set():
-            try:
-                indices = self.idx_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            for bidx in range(0, len(indices), self.batch_size):
-                batch_idx = indices[bidx:bidx + self.batch_size]
-                B = len(batch_idx)
-                inp_np = np.stack([self.chunks[i][0] for i in batch_idx])
-                tgt_np = np.stack([self.chunks[i][1] for i in batch_idx])
-                inp = torch.from_numpy(inp_np).long().to(self.device, non_blocking=True)
-                tgt = torch.from_numpy(tgt_np).long().to(self.device, non_blocking=True)
-                self.queue.put((inp, tgt, B))
-                if self.stop_event.is_set():
-                    break
-            self.queue.put(None)  # epoch done sentinel
-        self.queue.put(None)
-    
-    def get_batch(self):
-        return self.queue.get()
-    
-    def stop(self):
-        self.stop_event.set()
 
 
 def train_batched(model, tokenizer, filepath, chunk_size=1024, stride=512, epochs=5, batch_size=64):
