@@ -751,10 +751,28 @@ class Mind:
         final_temp = self._emotion_temp(adjusted_temp)
         augmented = self.augment_prompt(user_input)
         prompt_ids = self.tokenizer.encode(augmented)
-        generated_ids = self.model.generate_human(
-            prompt_ids, max_new_tokens=adjusted_max,
-            gestalt_temp=1.4, main_temp=final_temp
+
+        # Build emotion state dict for hybrid model (no-op if using pure BiologicLLMV2)
+        emotion_state = {}
+        try:
+            mood = self.emotions.global_mood
+            emotion_state = {k: float(v) for k, v in mood.v.items()}
+            emotion_state['fatigue'] = float(self.body.fatigue)
+            emotion_state['grief'] = float(self.grief.intensity)
+            emotion_state['curiosity'] = float(getattr(self.curiosity, 'level', 0))
+        except Exception:
+            pass
+
+        generate_kwargs = dict(
+            max_new_tokens=adjusted_max,
+            gestalt_temp=1.4,
+            main_temp=final_temp,
         )
+        # Pass emotion_state only if the model supports it (HybridNero does, BiologicLLMV2 doesn't)
+        if hasattr(self.model, 'build_system_prompt'):
+            generate_kwargs['emotion_state'] = emotion_state
+
+        generated_ids = self.model.generate_human(prompt_ids, **generate_kwargs)
         text = self.tokenizer.decode(generated_ids)
 
         # Real surprise-based metacognition
