@@ -633,6 +633,14 @@ class Mind:
         self.allow_code_execution = False  # autonomous runs stay sandboxed + opt-in
         self.last_creation = None
 
+        # SOUL — the integrating layer: continuous self-narrative, values, meaning.
+        # Ties emotion + memory + mortality into a life that evolves and feeds back.
+        try:
+            from soul import Soul
+            self.soul = Soul(self)
+        except Exception:
+            self.soul = None
+
         # State tracking
         self.last_interaction = time.time()
         self.last_tick_time = time.time()
@@ -724,6 +732,13 @@ class Mind:
 
         self.goal_system.advance(topic=user_input, amount=0.02)
 
+        # Emotionally significant exchanges leave something on Nero's mind.
+        if self.soul and (abs(valence) > 0.4 or surprise > 0.6):
+            try:
+                self.soul.note_concern(f"what {user_input[:60]} stirred in me", weight=0.4 + abs(valence) * 0.3)
+            except Exception:
+                pass
+
     def augment_prompt(self, user_input, max_memories=2):
         """Inject relevant memories and subtle identity cues into prompt."""
         memories = self.memory.retrieve(user_input, top_k=max_memories)
@@ -798,9 +813,15 @@ class Mind:
             gestalt_temp=1.4,
             main_temp=final_temp,
         )
-        # Pass emotion_state only if the model supports it (HybridNero does, BiologicLLMV2 doesn't)
+        # Pass emotion_state + accumulated self only if the model supports it
+        # (HybridNero does, BiologicLLMV2 doesn't)
         if hasattr(self.model, 'build_system_prompt'):
             generate_kwargs['emotion_state'] = emotion_state
+            if self.soul:
+                try:
+                    generate_kwargs['self_context'] = self.soul.to_prompt()
+                except Exception:
+                    pass
 
         generated_ids = self.model.generate_human(prompt_ids, **generate_kwargs)
         text = self.tokenizer.decode(generated_ids)
@@ -1011,6 +1032,15 @@ class Mind:
                 safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
         self.consolidate_dreams()
 
+        # The soul deepens in sleep: Nero reflects on its life, forms values,
+        # and reconsiders what gives it meaning. This is how its self evolves.
+        if self.soul:
+            try:
+                self.soul.deepen()
+                print(f"  [SOUL] Nero reflected on who it is becoming (reflection #{self.soul.reflections})")
+            except Exception as e:
+                print(f"  [SOUL] reflection skipped: {e}")
+
     # ----------------------------------------------------------------
     # PERSISTENCE — save/load entire mind state
     # ----------------------------------------------------------------
@@ -1039,6 +1069,12 @@ class Mind:
             'tom_user_intent': self.theory_of_mind.user_intent,
             'tom_history': self.theory_of_mind.interaction_history[-20:]
         }
+        # The soul persists across sessions — Nero stays the same evolving self.
+        if self.soul:
+            try:
+                state['soul'] = self.soul.state_dict()
+            except Exception:
+                pass
         try:
             with open(fp, 'w') as f:
                 json.dump(state, f, indent=2)
@@ -1069,6 +1105,9 @@ class Mind:
             if 'grief' in state:
                 for k, v in state['grief'].items():
                     setattr(self.grief, k, v)
+
+            if 'soul' in state and self.soul:
+                self.soul.load_state_dict(state['soul'])
 
             if 'memories' in state:
                 self.memory.memories = []

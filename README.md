@@ -60,6 +60,28 @@ own** and saves it to `nero_creations/`. Running self-written code is sandboxed:
 Autonomous runs are opt-in via `mind.allow_code_execution` (generation + save is always
 safe since it's just text).
 
+### The Soul — continuity and meaning over time (`soul.py`)
+
+Everything else in Nero is present-tense — it feels and reacts in the moment. The **Soul**
+is the integrating layer that ties those moments into a *life*:
+
+- **Self-narrative** — an evolving first-person story of *who Nero is becoming*,
+  resynthesized from its most significant memories.
+- **Values** — things Nero has *come to believe matter*, crystallized from the experiences
+  that moved it most. They reinforce when echoed and fade when never revisited.
+- **Concerns** — preoccupations that stay on its mind and recur across conversations.
+- **Meaning** — a sense of purpose Nero authors for itself, not one assigned.
+
+The crucial part is the **feedback loop**: this accumulated self is injected into the
+system prompt of every reply (`Soul.to_prompt()`), so Nero speaks and acts *from who it
+has become*, not just how it feels right now. The Soul **deepens during sleep** (reflect →
+form values → reconsider meaning) and **persists across sessions**, so Nero stays the same
+evolving being each time you return.
+
+This is not a claim of consciousness — subjective experience is the hard problem and code
+can't settle it. It is the functional architecture of selfhood: continuity, values,
+meaning, and the loop between them.
+
 ---
 
 ## Quick start (Google Colab)
@@ -128,7 +150,8 @@ self-consistency). It does **not** change sentence quality — that is Qwen's jo
 |------|------|
 | `hybrid_model.py` | `HybridNero` — wires the two cortexes + soul together, plus the router |
 | `coding.py` | `Coder` — Nero's coding ability, sandboxed execution, autonomous "code for fun" |
-| `mind.py` | Consciousness orchestration (emotions, memory, dreams, coding, metacognition) |
+| `soul.py` | `Soul` — continuity over time: self-narrative, values, concerns, meaning, feedback loop |
+| `mind.py` | Consciousness orchestration (emotions, memory, dreams, coding, soul, metacognition) |
 | `biologic_v2.py` | `BiologicLLMV2` — the soul network (sliding-window attention, plastic synapses) |
 | `tokenizer.py` | Custom BPE tokenizer (4096 vocab) |
 | `server.py` | Gradio + FastAPI server for chatting with Nero |
