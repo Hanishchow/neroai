@@ -31,11 +31,11 @@ class HybridNero(nn.Module):
 
         # Pass-through attributes mind.py expects on the model
         self.max_context = biologic_model.max_context
-        self.eos_token_id = biologic_model.eos_token_id
-        self.bos_token_id = biologic_model.bos_token_id
+        self.eos_token_id = getattr(biologic_model, 'eos_token_id', 3)
+        self.bos_token_id = getattr(biologic_model, 'bos_token_id', 2)
         self.growth_enabled = False
-        self.hebbian_enabled = biologic_model.hebbian_enabled
-        self._optimizer = biologic_model._optimizer
+        self.hebbian_enabled = getattr(biologic_model, 'hebbian_enabled', False)
+        self._optimizer = getattr(biologic_model, '_optimizer', None)
 
     def load_qwen(self, model_name='Qwen/Qwen2.5-1.5B-Instruct', quantize=True):
         """Load Qwen2.5-1.5B, optionally in 4-bit for T4."""
@@ -194,10 +194,18 @@ class HybridNero(nn.Module):
         self.biologic.eval()
         return self
 
-    @property
-    def device(self):
-        return self._device
-
-    @device.setter
-    def device(self, d):
-        self._device = d
+    def __getattr__(self, name):
+        """
+        Delegate any attribute not found on HybridNero to the wrapped biologic soul.
+        This lets mind.py (and other callers) reach biologic internals like
+        token_embedding transparently, as if HybridNero were the BiologicLLMV2.
+        """
+        # nn.Module stores submodules/params/buffers in special dicts — try those first
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            pass
+        biologic = self.__dict__.get('_modules', {}).get('biologic')
+        if biologic is not None:
+            return getattr(biologic, name)
+        raise AttributeError(name)
