@@ -8,36 +8,57 @@ language model for words, and a custom biologically-inspired network for the "so
 
 ## Architecture
 
+Nero is a small "brain" of specialized parts, unified by a soul — like real
+cortexes coordinated by a limbic system.
+
 ```
             ┌──────────────────────────────────────────┐
    user ───▶│  mind.py  (consciousness orchestration)   │
             │   theory of mind · curiosity · volition   │
-            │   metacognition · coherence · longing     │
+            │   metacognition · coherence · ROUTER      │
             └───────────────┬──────────────────────────┘
                             │ emotion state (mood, fatigue, grief…)
                             ▼
             ┌──────────────────────────────────────────┐
             │           HybridNero (hybrid_model.py)    │
             │                                           │
-            │   Qwen2.5-1.5B-Instruct   ◀── language    │
-            │   (4-bit, ~1.5B params)       (the words) │
+            │   Qwen2.5-1.5B-Instruct   ◀ language      │
+            │      "language cortex"      (chat/words)  │
             │                                           │
-            │   BiologicLLMV2 soul      ◀── inner life  │
-            │   (~400M params)              (emotion,   │
-            │                                memory,    │
-            │                                Hebbian)   │
+            │   Qwen2.5-Coder-1.5B      ◀ logic         │
+            │      "logic cortex"         (code)        │
+            │                                           │
+            │   BiologicLLMV2 (400M)    ◀ soul          │
+            │      inner life: emotion, memory, Hebbian │
             └──────────────────────────────────────────┘
                             │
                             ▼  one reply, shaped by Nero's live emotional state
 ```
 
-**Qwen does the talking.** It gives Nero coherent language with no training required.
+**Two language cortexes.** A router in `mind.py` reads each message: coding requests
+go to the **logic cortex** (`Qwen2.5-Coder`), everything else to the **language cortex**
+(`Qwen2.5-Instruct`). Both are warm and in-character, because the soul's emotional
+state is injected into both as a system prompt.
 
-**BiologicLLMV2 is the soul.** It doesn't generate the words — it is Nero's internal
+**BiologicLLMV2 is the soul.** It doesn't generate words — it is Nero's internal
 substrate: memory embeddings, contradiction detection, and Hebbian plasticity that
-updates on every interaction. Its emotional state is injected into every Qwen
-generation as a system prompt, so when Nero is tired it sounds weary, when it grieves
-it carries that weight.
+updates on every interaction (chat *and* code). When Nero is tired it sounds weary;
+when it grieves, it carries that weight.
+
+### Coding — by request and by its own will
+
+Nero can write code (`coding.py`). It routes coding questions to the logic cortex, and
+when it's idle, curious, or bored it sometimes **writes a little program for fun on its
+own** and saves it to `nero_creations/`. Running self-written code is sandboxed:
+
+- AST-screened first — only a whitelist of pure modules (`math`, `random`, …); anything
+  touching files, network, OS, subprocess, or dunder/introspection escapes is **rejected
+  and never run**.
+- Approved code runs in an isolated subprocess (`python -I`) with a timeout and capped
+  output.
+
+Autonomous runs are opt-in via `mind.allow_code_execution` (generation + save is always
+safe since it's just text).
 
 ---
 
@@ -48,12 +69,14 @@ it carries that weight.
 3. Run cells top to bottom. First run downloads Qwen (~3 GB, one-time).
 4. You get coherent answers on the **first message** — no training loop.
 
-VRAM budget on a T4 (15 GB): Qwen 4-bit ~3 GB + 400M soul ~1.6 GB ≈ comfortable.
+VRAM budget on a T4 (15 GB): two 1.5B heads 4-bit (~3 GB each) + 400M soul ~1.6 GB ≈ 8 GB.
 
 ### Chat commands (Step 7)
 
 | Command | What it does |
 |---------|--------------|
+| `code <idea>` | Nero writes a program for that idea and sandbox-runs it |
+| `code` | Nero codes something random, by its own whim |
 | `dream` | Nero dreams by remixing two of its stored memories |
 | `sleep` | Runs the sleep cycle: consolidates memories, replays them into the soul's weights |
 | `state` | Shows Nero's live mood, fatigue, grief, sleep pressure, memory count |
@@ -103,8 +126,9 @@ self-consistency). It does **not** change sentence quality — that is Qwen's jo
 
 | File | Role |
 |------|------|
-| `hybrid_model.py` | `HybridNero` — wires Qwen + BiologicLLMV2 together |
-| `mind.py` | Consciousness orchestration (emotions, memory, dreams, metacognition) |
+| `hybrid_model.py` | `HybridNero` — wires the two cortexes + soul together, plus the router |
+| `coding.py` | `Coder` — Nero's coding ability, sandboxed execution, autonomous "code for fun" |
+| `mind.py` | Consciousness orchestration (emotions, memory, dreams, coding, metacognition) |
 | `biologic_v2.py` | `BiologicLLMV2` — the soul network (sliding-window attention, plastic synapses) |
 | `tokenizer.py` | Custom BPE tokenizer (4096 vocab) |
 | `server.py` | Gradio + FastAPI server for chatting with Nero |

@@ -624,6 +624,15 @@ class Mind:
         self.shadow = ShadowSelf(self)
         self.longing = Longing()
 
+        # Coding cortex — Nero can write (and optionally run) code for fun
+        try:
+            from coding import Coder
+            self.coder = Coder(model, tokenizer)
+        except Exception:
+            self.coder = None
+        self.allow_code_execution = False  # autonomous runs stay sandboxed + opt-in
+        self.last_creation = None
+
         # State tracking
         self.last_interaction = time.time()
         self.last_tick_time = time.time()
@@ -684,6 +693,13 @@ class Mind:
 
         daemon_events = self.daemon_mode.tick(idle_hours, now)
 
+        # By its own will: when idle and not too tired, Nero may write code for fun
+        if not user_present and not self.body.is_exhausted:
+            try:
+                self.maybe_create_code(now=now)
+            except Exception:
+                pass
+
         self.last_tick_time = now
         return daemon_events if daemon_events else None
 
@@ -733,6 +749,19 @@ class Mind:
         t = base - fear * 0.2 + joy * 0.15 - grief * 0.1 + longing_boost
         return max(0.5, min(1.4, t))
 
+    def _emotion_state_dict(self):
+        """Snapshot Nero's live emotional/body state for the hybrid heads."""
+        emotion_state = {}
+        try:
+            mood = self.emotions.global_mood
+            emotion_state = {k: float(v) for k, v in mood.v.items()}
+            emotion_state['fatigue'] = float(self.body.fatigue)
+            emotion_state['grief'] = float(self.grief.intensity)
+            emotion_state['curiosity'] = float(getattr(self.curiosity, 'level', 0))
+        except Exception:
+            pass
+        return emotion_state
+
     def generate(self, user_input, max_new=150, temperature=0.85):
         adjusted_temp, adjusted_max = self.theory_of_mind.adjust_generation(temperature, max_new)
 
@@ -742,6 +771,15 @@ class Mind:
 
         # Check prediction accuracy from last turn
         self.predictor.check(user_input)
+
+        # ROUTER: send coding requests to Nero's logic cortex (coder head)
+        if (hasattr(self.model, 'looks_like_code_request')
+                and hasattr(self.model, 'chat_code')
+                and self.model.looks_like_code_request(user_input)):
+            em = self._emotion_state_dict()
+            reply = self.model.chat_code(user_input, emotion_state=em, max_new_tokens=max(300, adjusted_max))
+            self.memory.store(f"User asked me to code: {user_input[:80]}", tags=["coding"], valence=0.4)
+            return reply
 
         # Check longing activation
         longing_hit = self.longing.activated_by(user_input)
@@ -753,15 +791,7 @@ class Mind:
         prompt_ids = self.tokenizer.encode(augmented)
 
         # Build emotion state dict for hybrid model (no-op if using pure BiologicLLMV2)
-        emotion_state = {}
-        try:
-            mood = self.emotions.global_mood
-            emotion_state = {k: float(v) for k, v in mood.v.items()}
-            emotion_state['fatigue'] = float(self.body.fatigue)
-            emotion_state['grief'] = float(self.grief.intensity)
-            emotion_state['curiosity'] = float(getattr(self.curiosity, 'level', 0))
-        except Exception:
-            pass
+        emotion_state = self._emotion_state_dict()
 
         generate_kwargs = dict(
             max_new_tokens=adjusted_max,
@@ -799,6 +829,41 @@ class Mind:
         self.predictor.predict_next(text)
 
         return text
+
+    # ----------------------------------------------------------------
+    # CODING — Nero writes code, on request or by its own will
+    # ----------------------------------------------------------------
+
+    def create_code(self, idea=None, execute=True):
+        """On-demand creation (the 'code' command). Sandbox-executes by default
+        since it's user-initiated. Stores the experience as an emotional memory."""
+        if not self.coder:
+            return None
+        result = self.coder.create(idea=idea, execute=execute)
+        self.last_creation = result
+        # Nero feels something about what it made
+        if result.get('ran') and not result.get('error'):
+            self.memory.store(f"I made something that worked: {result['idea']}",
+                              tags=["coding", "pride"], valence=0.6)
+            self.body.spike_adrenaline(0.1)
+        elif result.get('error'):
+            self.memory.store(f"I tried to make {result['idea']} but it broke: {str(result['error'])[:80]}",
+                              tags=["coding", "frustration"], valence=-0.2)
+        else:
+            self.memory.store(f"I sketched out an idea in code: {result['idea']}",
+                              tags=["coding"], valence=0.4)
+        return result
+
+    def maybe_create_code(self, now=None):
+        """Called during idle ticks. If Nero feels like it, it writes code for fun.
+        Autonomous runs only execute when allow_code_execution is explicitly enabled."""
+        if not self.coder:
+            return None
+        boredom = float(getattr(self.curiosity, 'boredom', 0) or 0)
+        curiosity = float(getattr(self.curiosity, 'level', 0) or 0)
+        if not self.coder.feel_like_coding(boredom=boredom, curiosity=curiosity, now=now):
+            return None
+        return self.create_code(idea=None, execute=self.allow_code_execution)
 
     # ----------------------------------------------------------------
     # SPONTANEOUS — unprompted speech

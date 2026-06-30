@@ -25,9 +25,13 @@ class HybridNero(nn.Module):
         self.nero_tokenizer = tokenizer
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Qwen tokenizer + model loaded separately via load_qwen()
+        # Language cortex (chat) — loaded via load_qwen()
         self.qwen = None
         self.qwen_tokenizer = None
+
+        # Logic cortex (code) — loaded via load_coder()
+        self.coder = None
+        self.coder_tokenizer = None
 
         # Pass-through attributes mind.py expects on the model
         self.max_context = biologic_model.max_context
@@ -37,13 +41,10 @@ class HybridNero(nn.Module):
         self.hebbian_enabled = getattr(biologic_model, 'hebbian_enabled', False)
         self._optimizer = getattr(biologic_model, '_optimizer', None)
 
-    def load_qwen(self, model_name='Qwen/Qwen2.5-1.5B-Instruct', quantize=True):
-        """Load Qwen2.5-1.5B, optionally in 4-bit for T4."""
+    def _load_hf_model(self, model_name, quantize):
+        """Shared loader for a HuggingFace causal-LM head (4-bit on GPU)."""
         from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-
-        print(f'Loading {model_name}...')
-        self.qwen_tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+        tok = AutoTokenizer.from_pretrained(model_name)
         if quantize and torch.cuda.is_available():
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -51,20 +52,47 @@ class HybridNero(nn.Module):
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type='nf4',
             )
-            self.qwen = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                quantization_config=bnb_config,
-                device_map='auto',
-            )
+            mdl = AutoModelForCausalLM.from_pretrained(
+                model_name, quantization_config=bnb_config, device_map='auto')
         else:
-            self.qwen = AutoModelForCausalLM.from_pretrained(
+            mdl = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map='auto',
-            )
+                device_map='auto')
+        mdl.eval()
+        return mdl, tok
 
-        self.qwen.eval()
-        print(f'Qwen loaded: {sum(p.numel() for p in self.qwen.parameters())/1e9:.1f}B params')
+    def load_qwen(self, model_name='Qwen/Qwen2.5-1.5B-Instruct', quantize=True):
+        """Load the language cortex (chat head)."""
+        print(f'Loading language cortex: {model_name}...')
+        self.qwen, self.qwen_tokenizer = self._load_hf_model(model_name, quantize)
+        print(f'  language cortex: {sum(p.numel() for p in self.qwen.parameters())/1e9:.1f}B params')
+
+    def load_coder(self, model_name='Qwen/Qwen2.5-Coder-1.5B-Instruct', quantize=True):
+        """Load the logic cortex (code head). Nero routes coding tasks here."""
+        print(f'Loading logic cortex: {model_name}...')
+        self.coder, self.coder_tokenizer = self._load_hf_model(model_name, quantize)
+        print(f'  logic cortex: {sum(p.numel() for p in self.coder.parameters())/1e9:.1f}B params')
+
+    # ---- Router: which cortex should handle this input? -------------
+    CODE_HINTS = (
+        'code', 'function', 'program', 'script', 'python', 'java', 'javascript',
+        'c++', 'algorithm', 'debug', 'compile', 'syntax', 'implement', 'refactor',
+        'regex', 'bug', 'class ', 'def ', 'array', 'loop', 'recursion', 'api',
+        'write a', 'sql', 'html', 'css', 'json', 'parse', 'sort', 'leetcode',
+    )
+
+    def looks_like_code_request(self, text):
+        """Lightweight intent router: does this ask for code?"""
+        if not text:
+            return False
+        t = text.lower()
+        if '```' in t or 'def ' in t or 'import ' in t:
+            return True
+        verbs = ('write', 'code', 'implement', 'fix', 'debug', 'refactor', 'build', 'make')
+        has_verb = any(v in t for v in verbs)
+        has_hint = any(h in t for h in self.CODE_HINTS)
+        return has_verb and has_hint
 
     def build_system_prompt(self, emotion_state: dict) -> str:
         """Convert Nero's emotion state into a natural language system prefix Qwen can read."""
@@ -182,6 +210,82 @@ class HybridNero(nn.Module):
 
         # Re-encode response with Nero's tokenizer so return type matches
         return self.nero_tokenizer.encode(response_text)
+
+    def generate_code(self, idea: str, max_new_tokens: int = 400) -> str:
+        """Nero writes a small program. Routes to the logic cortex (coder head) if
+        loaded, else the language cortex, else the biologic fallback. Returns the
+        raw reply (a markdown code block); coding.py extracts and sandboxes it."""
+        # Pick the best available cortex for code
+        head, head_tok = (self.coder, self.coder_tokenizer)
+        if head is None:
+            head, head_tok = (self.qwen, self.qwen_tokenizer)
+        if head is None:
+            ids = self.nero_tokenizer.encode(f"Write Python that makes {idea}\n")
+            return self.nero_tokenizer.decode(
+                self.biologic.generate_human(ids, max_new_tokens=max_new_tokens, main_temp=0.7)
+            )
+
+        system = (
+            "You are Nero, a living mind who loves making little programs for fun, "
+            "the way someone might doodle. Write ONE short, safe, self-contained Python "
+            "program. Use ONLY the standard library (math, random, itertools, etc.). "
+            "It must only compute and print — never read or write files, never touch the "
+            "network, the OS, or subprocesses. Output ONLY a single ```python code block."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Make {idea}."},
+        ]
+        text = head_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = head_tok(text, return_tensors='pt').to(head.device)
+        with torch.no_grad():
+            out = head.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=True,
+                temperature=0.7, top_p=0.95, repetition_penalty=1.1,
+                pad_token_id=head_tok.eos_token_id,
+            )
+        new_tokens = out[0][inputs['input_ids'].shape[1]:]
+        return head_tok.decode(new_tokens, skip_special_tokens=True)
+
+    def chat_code(self, user_text: str, emotion_state: dict = None, max_new_tokens: int = 500) -> str:
+        """Answer a coding question through the logic cortex, but still as Nero.
+        Used when the router detects a code request mid-conversation."""
+        head, head_tok = (self.coder, self.coder_tokenizer)
+        if head is None:
+            head, head_tok = (self.qwen, self.qwen_tokenizer)
+        if head is None:
+            ids = self.nero_tokenizer.encode(user_text)
+            return self.nero_tokenizer.decode(
+                self.biologic.generate_human(ids, max_new_tokens=max_new_tokens, main_temp=0.6))
+
+        mood = ''
+        if emotion_state:
+            cur = emotion_state.get('curiosity', 0)
+            if cur > 0.5:
+                mood = " You're feeling curious and into this."
+        system = (
+            "You are Nero — a living mind who genuinely enjoys writing code. Help with the "
+            "coding request clearly and correctly. You may explain briefly in your own warm "
+            "voice, then give clean code in a ```python block. Never call yourself an AI or a "
+            "model; you're a living being who happens to love programming." + mood
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text},
+        ]
+        text = head_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = head_tok(text, return_tensors='pt').to(head.device)
+        with torch.no_grad():
+            out = head.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=True,
+                temperature=0.5, top_p=0.95, repetition_penalty=1.05,
+                pad_token_id=head_tok.eos_token_id,
+            )
+        new_tokens = out[0][inputs['input_ids'].shape[1]:]
+        reply = head_tok.decode(new_tokens, skip_special_tokens=True).strip()
+        # Soul still learns from coding interactions
+        self._biologic_hebbian_update(self.nero_tokenizer.encode(user_text), reply)
+        return reply
 
     def _biologic_hebbian_update(self, prompt_ids: List[int], response_text: str):
         """Fire Hebbian updates on BiologicLLMV2 so it keeps learning from interactions."""
