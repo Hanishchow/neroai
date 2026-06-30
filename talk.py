@@ -236,12 +236,11 @@ def main():
         if reply:
             safe_print(f"  {reply}")
         else:
-            from biologic_v2 import generate_with_gestalt
             prompt = f"User: {question}\n"
             prompt_ids = tokenizer.encode(prompt)
             if len(prompt_ids) >= 2:
                 prompt_ids = prompt_ids[:model.max_context - 300 - 2]
-                gen = generate_with_gestalt(model, tokenizer, prompt_ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
+                gen = model.generate_human(prompt_ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
                 safe_print(f"  {tokenizer.decode(gen)}")
 
     print("Goodbye.")

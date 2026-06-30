@@ -10,6 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from tokenizer import BPETokenizer
 
+def _unwrap(m):
+    return m.module if hasattr(m, 'module') else m
+
 os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
 torch.backends.cudnn.benchmark = True
 torch.set_num_threads(os.cpu_count())
@@ -425,12 +428,11 @@ def main():
         if reply:
             safe_print(f"  {reply}")
         else:
-            from biologic_v2 import generate_with_gestalt
             prompt = f"User: {question}\n"
             ids = tokenizer.encode(prompt)
             if len(ids) >= 2:
                 ids = ids[:model.max_context - 300 - 2]
-                gen = generate_with_gestalt(model, tokenizer, ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
+                gen = model.generate_human(ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
                 safe_print(f"  {tokenizer.decode(gen)}")
     
     print("Goodbye.")

@@ -184,7 +184,7 @@ class BPETokenizer:
         self.vocab_size = data['vocab_size']
         self.merges = {tuple(map(int, k.split(','))): v for k, v in data['merges'].items()}
         self.inverse_merges = {v: k for k, v in self.merges.items()}
-        self.char_level_vocab = {int(k) if k.isdigit() else k: v for k, v in data['char_level_vocab'].items()}
+        self.char_level_vocab = {k: v for k, v in data['char_level_vocab'].items()}
         self.vocab = {int(k): v for k, v in data['vocab'].items()}
         self.trained = True
 

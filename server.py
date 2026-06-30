@@ -35,8 +35,15 @@ model.eos_token_id = tokenizer.SPECIAL_TOKENS.get('<EOS>', 3)
 
 if args.load and os.path.exists(args.load):
     sd = torch.load(args.load, map_location=DEVICE, weights_only=True)
-    model.load_state_dict(sd)
-    print(f"Loaded: {args.load}")
+    try:
+        model.load_state_dict(sd)
+        print(f"Loaded: {args.load}")
+    except RuntimeError as e:
+        print(f"[WARNING] Checkpoint mismatch — running with random weights.")
+        print(f"  Detail: {e}")
+elif args.load:
+    print(f"[WARNING] Checkpoint not found: {args.load}")
+    print(f"  Hint: use the full path, e.g. --load C:\\Users\\yakka\\Downloads\\nero_model\\nero_v1.pt")
 
 from mind import Mind
 mind = Mind(model, tokenizer)

@@ -26,14 +26,13 @@ def safe_print(text):
     sys.stdout.flush()
 
 def generate_response(user_input, model, tokenizer, max_new=120, temperature=0.85):
-    from biologic_v2 import generate_with_gestalt
     prompt = f"User: {user_input}\n"
     prompt_ids = tokenizer.encode(prompt)
     if len(prompt_ids) < 2:
         return "[...]"
     prompt_ids = prompt_ids[:model.max_context - max_new - 2]
-    generated_ids = generate_with_gestalt(
-        model, tokenizer, prompt_ids, max_new_tokens=max_new,
+    generated_ids = model.generate_human(
+        prompt_ids, max_new_tokens=max_new,
         gestalt_temp=1.3, main_temp=temperature
     )
     return tokenizer.decode(generated_ids)

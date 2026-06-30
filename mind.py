@@ -259,8 +259,14 @@ class Metacognition:
         return None
 
     def _compute_surprise(self, text):
-        """Simple surprise metric based on output length vs model confidence."""
-        return random.uniform(0, 0.5)  # placeholder until we have access to logprobs
+        ids = self.mind.tokenizer.encode(text)
+        if len(ids) < 2:
+            return 0.0
+        inp = torch.tensor([ids[:-1]], device=self.mind.model.device)
+        tgt = torch.tensor([ids[1:]], device=self.mind.model.device)
+        with torch.no_grad():
+            _, loss, _ = self.mind.model(inp, targets=tgt)
+        return min(1.0, max(0.0, (loss.item() - 1.0) / 4.0)) if loss else 0.0
 
     def get_state_summary(self):
         return {
@@ -401,6 +407,103 @@ class AutonomousCuriosity:
 
 
 # ================================================================
+# COHERENCE — contradiction detection
+# ================================================================
+
+class Coherence:
+    def check(self, new_statement, mind):
+        new_emb = mind.memory._embed(new_statement)
+        if new_emb is None:
+            return None
+        for mem in mind.memory.memories:
+            if 'belief' not in mem.get('tags', []):
+                continue
+            emb = mem.get('embedding')
+            if emb is None:
+                continue
+            sim = float(np.dot(new_emb, emb) / (np.linalg.norm(new_emb) * np.linalg.norm(emb) + 1e-8))
+            if sim < -0.3:
+                return mem['text']
+        return None
+
+
+# ================================================================
+# CONVERSATION PREDICTOR — predict what user will say next
+# ================================================================
+
+class ConversationPredictor:
+    def __init__(self, mind):
+        self.mind = mind
+        self.last_prediction = None
+        self.accuracy_history = []
+
+    def predict_next(self, current_reply):
+        prompt = f"After I say: {current_reply[:100]}\nThe user will probably say:"
+        ids = self.mind.tokenizer.encode(prompt)
+        gen = self.mind.model.generate(ids, max_new_tokens=30, temperature=0.9)
+        self.last_prediction = self.mind.tokenizer.decode(gen)
+        return self.last_prediction
+
+    def check(self, actual_input):
+        if not self.last_prediction:
+            return 0.5
+        p = set(self.mind.tokenizer.encode(self.last_prediction))
+        a = set(self.mind.tokenizer.encode(actual_input))
+        overlap = len(p & a) / max(len(p | a), 1)
+        self.accuracy_history.append(overlap)
+        if len(self.accuracy_history) > 100:
+            self.accuracy_history.pop(0)
+        return 1.0 - overlap  # surprise score
+
+
+# ================================================================
+# SHADOW SELF — internal dissenting voice
+# ================================================================
+
+class ShadowSelf:
+    def __init__(self, mind):
+        self.mind = mind
+        self.activation_count = 0
+
+    def dissent(self, statement):
+        prompt = f"But what if the opposite were true: {statement[:80]}"
+        ids = self.mind.tokenizer.encode(prompt)
+        gen = self.mind.model.generate(ids, max_new_tokens=40, temperature=1.1)
+        self.activation_count += 1
+        return self.mind.tokenizer.decode(gen)
+
+
+# ================================================================
+# LONGING — desire for absent things
+# ================================================================
+
+class Longing:
+    def __init__(self):
+        self.targets = []
+        self.intensity = 0.0
+
+    def add(self, thing, intensity=0.5):
+        self.targets.append({'thing': thing, 'intensity': float(intensity), 'formed_at': time.time()})
+        self.intensity = max(t['intensity'] for t in self.targets)
+
+    def tick(self, hours):
+        self.intensity *= max(0.98, 1.0 - hours * 0.01)
+        for t in self.targets:
+            t['intensity'] *= max(0.99, 1.0 - hours * 0.005)
+        self.targets = [t for t in self.targets if t['intensity'] > 0.05]
+
+    def activated_by(self, text):
+        lower = text.lower()
+        for t in self.targets:
+            if any(w in lower for w in t['thing'].lower().split()):
+                return t
+        return None
+
+    def get_state_summary(self):
+        return {'intensity': f"{self.intensity:.2f}", 'targets': len(self.targets)}
+
+
+# ================================================================
 # MEMORY STORE (re-exported from consciousness for convenience)
 # ================================================================
 
@@ -515,6 +618,12 @@ class Mind:
         self.aesthetic_sense = AestheticSense(self)
         self.daemon_mode = DaemonMode(self)
 
+        # Additions: closed-loop consciousness systems
+        self.coherence = Coherence()
+        self.predictor = ConversationPredictor(self)
+        self.shadow = ShadowSelf(self)
+        self.longing = Longing()
+
         # State tracking
         self.last_interaction = time.time()
         self.last_tick_time = time.time()
@@ -584,8 +693,11 @@ class Mind:
 
     def store_interaction(self, user_input, response, valence=0.0):
         """Store a conversation turn and update all systems."""
-        self.memory.store(f"User: {user_input}\n{response}",
-                          tags=["interaction"], valence=valence)
+        surprise = self.metacognition._compute_surprise(response)
+        text = f"User: {user_input}\n{response}"
+        self.memory.store(text, tags=["interaction"], valence=valence)
+        if self.memory.memories:
+            self.memory.memories[-1]['surprise'] = surprise
         self.last_interaction = time.time()
         self.user_absent_hours = 0
 
@@ -612,27 +724,61 @@ class Mind:
     # GENERATE — wrapped generation with metacognitive reflection
     # ----------------------------------------------------------------
 
-    def generate(self, user_input, max_new=150, temperature=0.85):
-        """Generate a response with memory augmentation, theory of mind,
-        metacognition, doubt expression, and aesthetic preference."""
+    def _emotion_temp(self, base=0.85):
+        mood = getattr(self.emotions, 'global_mood', None) if self.emotions else None
+        fear = mood.v.get('fear', 0) if mood else 0
+        joy  = mood.v.get('joy',  0) if mood else 0
+        grief = self.grief.severity
+        longing_boost = self.longing.intensity * 0.1
+        t = base - fear * 0.2 + joy * 0.15 - grief * 0.1 + longing_boost
+        return max(0.5, min(1.4, t))
 
+    def generate(self, user_input, max_new=150, temperature=0.85):
         adjusted_temp, adjusted_max = self.theory_of_mind.adjust_generation(temperature, max_new)
 
         should_respond, reason = self.volition.wants_to_respond(user_input)
         if not should_respond:
             return self.volition.get_refusal(reason)
 
+        # Check prediction accuracy from last turn
+        self.predictor.check(user_input)
+
+        # Check longing activation
+        longing_hit = self.longing.activated_by(user_input)
+        if longing_hit:
+            self.body.spike_adrenaline(0.15)
+
+        final_temp = self._emotion_temp(adjusted_temp)
         augmented = self.augment_prompt(user_input)
         prompt_ids = self.tokenizer.encode(augmented)
         generated_ids = self.model.generate_human(
             prompt_ids, max_new_tokens=adjusted_max,
-            gestalt_temp=1.4, main_temp=adjusted_temp
+            gestalt_temp=1.4, main_temp=final_temp
         )
         text = self.tokenizer.decode(generated_ids)
 
-        meta_followup = self.metacognition.reflect(text)
-        if meta_followup:
-            text = text + "\n" + meta_followup
+        # Real surprise-based metacognition
+        surprise = self.metacognition._compute_surprise(text)
+        if surprise > 0.6:
+            meta_followup = self.metacognition.reflect(text)
+            if meta_followup:
+                text = text + "\n" + meta_followup
+
+        # Contradiction check against stored beliefs
+        contradiction = self.coherence.check(text, self)
+        if contradiction:
+            self.memory.store(
+                f"I contradicted myself: previously '{contradiction[:80]}' but now said something opposing.",
+                tags=['contradiction'], valence=-0.3
+            )
+
+        # Shadow self: occasionally let the dissenting voice influence output
+        if random.random() < 0.12 and len(text) > 20:
+            shadow_text = self.shadow.dissent(text)
+            self.memory.store(shadow_text, tags=['shadow'], valence=0.1)
+
+        # Predict what user will say next
+        self.predictor.predict_next(text)
 
         return text
 
@@ -742,10 +888,36 @@ class Mind:
     # SLEEP — forced consolidation cycle
     # ----------------------------------------------------------------
 
+    def _replay_into_weights(self, top_n=16):
+        """Fine-tune on top surprising memories — weights become the memory."""
+        if not self.memory.memories or self.model._optimizer is None:
+            return
+        scored = sorted(
+            [m for m in self.memory.memories if m.get('embedding') is not None],
+            key=lambda m: m.get('surprise', 0), reverse=True
+        )[:top_n]
+        self.model.train()
+        for mem in scored:
+            ids = self.tokenizer.encode(mem['text'])
+            if len(ids) < 4:
+                continue
+            inp = torch.tensor([ids[:-1]], device=self.model.device)
+            tgt = torch.tensor([ids[1:]], device=self.model.device)
+            _, loss, _ = self.model(inp, targets=tgt)
+            if loss is not None and not (torch.isnan(loss) or torch.isinf(loss)):
+                self.model._optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.model._optimizer.step()
+        self.model.eval()
+        print(f"  [SLEEP] Replayed {len(scored)} memories into weights")
+
     def sleep(self, model, tokenizer, mortality_anxiety=0.0, emotion_system=None):
         """Run a full sleep cycle: consolidate, dream, reset body."""
         print("  [MIND] Falling asleep...")
         model.consolidate_memory()
+        self._replay_into_weights()
+        self.longing.tick(hours=8)
         self.sleep_pressure.force_sleep()
         self.time.sleep()
         self.body.fatigue = max(0, self.body.fatigue - 0.6)
@@ -1005,7 +1177,7 @@ class TheoryOfMind:
             temp = min(1.2, temp + 0.2)
         if self.user_energy < 0.3:
             length = min(80, length)
-        return temperature, max_new
+        return temp, length
 
     def get_narrative(self, topic=""):
         """Generate a natural-language theory of the user's current state."""
