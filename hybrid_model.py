@@ -78,8 +78,8 @@ class HybridNero(nn.Module):
     CODE_HINTS = (
         'code', 'function', 'program', 'script', 'python', 'java', 'javascript',
         'c++', 'algorithm', 'debug', 'compile', 'syntax', 'implement', 'refactor',
-        'regex', 'bug', 'class ', 'def ', 'array', 'loop', 'recursion', 'api',
-        'write a', 'sql', 'html', 'css', 'json', 'parse', 'sort', 'leetcode',
+        'regex', 'class ', 'def ', 'recursion', 'api endpoint',
+        'sql', 'html', 'css', 'json', 'leetcode', 'snippet', 'compiler',
     )
 
     def looks_like_code_request(self, text):

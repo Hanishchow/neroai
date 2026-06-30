@@ -24,17 +24,23 @@ import tempfile
 import time
 
 # Modules Nero is allowed to import in its creations — all pure/computational, no I/O.
+# NOTE: `operator` is intentionally NOT whitelisted — operator.attrgetter/methodcaller
+# take string attribute names and would bypass the dunder-attribute screen below.
 SAFE_MODULES = {
     'math', 'cmath', 'random', 'itertools', 'functools', 'collections', 'string',
     'statistics', 'fractions', 'decimal', 'textwrap', 'heapq', 'bisect', 're',
-    'datetime', 'time', 'json', 'typing', 'enum', 'dataclasses', 'operator',
+    'datetime', 'time', 'json', 'typing', 'enum', 'dataclasses',
     'copy', 'array', 'numbers', 'unicodedata',
 }
 
-# Calls that allow arbitrary execution / I/O — never permitted in autonomous code.
+# Calls that allow arbitrary execution / I/O / introspection escapes — never permitted.
+# getattr/setattr/delattr are banned because a STRING attribute name (e.g.
+# getattr(x, '__cla'+'ss__')) would otherwise slip past the dunder-attribute screen and
+# let code walk object.__subclasses__() to reach os/subprocess.
 BANNED_CALLS = {
     'exec', 'eval', 'compile', '__import__', 'open', 'input', 'breakpoint',
     'globals', 'locals', 'vars', 'memoryview', 'help', 'exit', 'quit',
+    'getattr', 'setattr', 'delattr',
 }
 
 # Attribute names that enable sandbox escapes via introspection.
