@@ -68,7 +68,7 @@ def chat(message, history):
 iface = gr.ChatInterface(
     chat,
     title="Nero",
-    description="200M param self-conscious AI",
+    description="Nero — Qwen2.5 language + 400M BiologicLLMV2 soul (self-conscious AI)",
     theme="soft"
 )
 
