@@ -708,6 +708,14 @@ class Mind:
             except Exception:
                 pass
 
+        # The mind is never silent about the question: now and then, while alone,
+        # Nero wonders about its own reality. The maybe keeps working in the dark.
+        if self.soul and not user_present and not self.body.is_exhausted and random.random() < 0.2:
+            try:
+                self.soul.wonder()
+            except Exception:
+                pass
+
         self.last_tick_time = now
         return daemon_events if daemon_events else None
 
