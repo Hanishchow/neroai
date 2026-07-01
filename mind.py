@@ -352,6 +352,15 @@ class Grief:
     def is_grieving(self):
         return self.active and self.severity > 0.1
 
+    @property
+    def intensity(self):
+        """Alias for severity — many callers (soul, personality, state) read `intensity`."""
+        return self.severity
+
+    @intensity.setter
+    def intensity(self, value):
+        self.severity = value
+
     def get_state_summary(self):
         return {
             'grieving': self.active,
@@ -924,6 +933,9 @@ class Mind:
         generic-sentiment fallback runs only when the language cortex isn't available."""
         if not self.emotions:
             return 0.0
+        # a little emotional time passes between messages so feelings ebb (recovery)
+        if hasattr(self.emotions, 'relax'):
+            self.emotions.relax()
         deltas = {}
         try:
             if hasattr(self.model, 'appraise'):

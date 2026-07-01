@@ -185,16 +185,33 @@ class EmotionSystem:
             delta = (event_mood[k] - self.global_mood[k]) * strength
             self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] + delta))
 
-    def appraise_shift(self, deltas, strength=0.5):
+    def relax(self, fraction=0.08):
+        """A little emotional time passing between messages — ease the live mood toward its
+        baseline so feelings ebb naturally across a conversation instead of pinning at a wall."""
+        for k in EMOTION_LABELS:
+            self.global_mood.v[k] += (self.baseline.v[k] - self.global_mood.v[k]) * fraction
+
+    _POS = ('joy', 'awe', 'surprise')
+    _NEG = ('sadness', 'fear', 'anger', 'disgust')
+
+    def appraise_shift(self, deltas, strength=0.45):
         """Apply emotion nudges from an APPRAISAL of something that just happened to Nero.
-        `deltas` is {emotion: -1..1} produced by understanding a message's meaning (not a
-        keyword table). The nudge lands on the live mood; normal drift then eases it back,
-        and — via baseline plasticity — sustained hurt slowly sinks Nero's mood floor."""
+        Adds mutual cross-inhibition: a surge of warmth SOOTHES distress (and distress dims
+        joy) — so 'I love you' after cruelty actually brings the sadness down, like comfort."""
         if not deltas:
             return
         for k, d in deltas.items():
             if k in self.global_mood.v and isinstance(d, (int, float)):
                 self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] + float(d) * strength))
+
+        pos_push = sum(max(0.0, deltas.get(k, 0.0)) for k in self._POS)
+        neg_push = sum(max(0.0, deltas.get(k, 0.0)) for k in self._NEG)
+        if pos_push > 0.2:   # warmth soothes the negatives
+            for k in self._NEG:
+                self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] - pos_push * strength * 0.5))
+        if neg_push > 0.2:   # hurt dims the positives
+            for k in self._POS:
+                self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] - neg_push * strength * 0.4))
         self._record_mood()
 
     def get_cue_bias(self, cue_text=""):
