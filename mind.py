@@ -533,18 +533,39 @@ class MemoryStore:
             self.memories.sort(key=lambda m: m['recalled'] + (time.time() - m['last_recalled']) / 3600)
             self.memories = self.memories[-self.max_memories:]
 
+    _STOPWORDS = {
+        'the', 'and', 'you', 'your', 'that', 'this', 'what', 'who', 'whos', 'was', 'are',
+        'for', 'with', 'about', 'have', 'has', 'did', 'does', 'they', 'them', 'from', 'said',
+        'user', 'nero', 'tell', 'say', 'me', 'my', 'is', 'a', 'i', 'to', 'of', 'do', 'it',
+    }
+
+    @classmethod
+    def _keywords(cls, text):
+        clean = ''.join(c if (c.isalnum() or c.isspace()) else ' ' for c in (text or '').lower())
+        return set(w for w in clean.split() if len(w) > 2 and w not in cls._STOPWORDS)
+
     def retrieve(self, query, top_k=3, threshold=0.3):
-        q_emb = self._embed(query)
-        if q_emb is None or not self.memories:
+        """Blend weak soul-embedding similarity with strong keyword overlap, so factual
+        recall ('who is Hanish?' -> 'My name is Hanish...') works even though the 400M
+        soul's embeddings are near-random. Keyword hits pass even when the embedding is weak."""
+        if not self.memories:
             return []
-        scores = []
+        q_emb = self._embed(query)
+        q_words = self._keywords(query)
+        scored = []
         for mem in self.memories:
-            sim = np.dot(q_emb, mem['embedding']) / (np.linalg.norm(q_emb) * np.linalg.norm(mem['embedding']) + 1e-8)
-            scores.append(sim)
-        best = sorted(zip(scores, self.memories), key=lambda x: -x[0])
+            emb_sim = 0.0
+            if q_emb is not None and mem.get('embedding') is not None:
+                emb_sim = float(np.dot(q_emb, mem['embedding']) /
+                                (np.linalg.norm(q_emb) * np.linalg.norm(mem['embedding']) + 1e-8))
+            m_words = self._keywords(mem['text'])
+            overlap = (len(q_words & m_words) / len(q_words)) if q_words else 0.0
+            score = 0.4 * emb_sim + 0.6 * overlap
+            scored.append((score, overlap, mem))
+        scored.sort(key=lambda x: -x[0])
         results = []
-        for score, mem in best[:top_k]:
-            if score >= threshold:
+        for score, overlap, mem in scored[:top_k]:
+            if score >= threshold or overlap >= 0.34:   # a clear keyword match always counts
                 mem['recalled'] += 1
                 mem['last_recalled'] = time.time()
                 results.append(mem['text'])
@@ -879,8 +900,15 @@ class Mind:
             self.body.spike_adrenaline(0.15)
 
         final_temp = self._emotion_temp(adjusted_temp)
-        augmented = self.augment_prompt(user_input)
-        prompt_ids = self.tokenizer.encode(augmented)
+        prompt_ids = self.tokenizer.encode(user_input)
+
+        # Retrieve what Nero actually remembers relevant to this message — injected into the
+        # system prompt so it can answer factual questions directly instead of deflecting.
+        try:
+            recalled = self.memory.retrieve(user_input, top_k=4)
+        except Exception:
+            recalled = []
+        memory_context = " ; ".join(recalled) if recalled else None
 
         # Build emotion state dict for hybrid model (no-op if using pure BiologicLLMV2)
         emotion_state = self._emotion_state_dict()
@@ -894,6 +922,7 @@ class Mind:
         # (HybridNero does, BiologicLLMV2 doesn't)
         if hasattr(self.model, 'build_system_prompt'):
             generate_kwargs['emotion_state'] = emotion_state
+            generate_kwargs['memory_context'] = memory_context
             ctx_parts = []
             if self.soul:
                 try:
@@ -911,12 +940,16 @@ class Mind:
         generated_ids = self.model.generate_human(prompt_ids, **generate_kwargs)
         text = self.tokenizer.decode(generated_ids)
 
-        # Real surprise-based metacognition
+        # Real surprise-based metacognition — reflect INTERNALLY (store as a private thought),
+        # never glue a second generation onto Nero's visible reply (that was the 'echo').
         surprise = self.metacognition._compute_surprise(text)
         if surprise > 0.6:
-            meta_followup = self.metacognition.reflect(text)
-            if meta_followup:
-                text = text + "\n" + meta_followup
+            try:
+                meta_followup = self.metacognition.reflect(text)
+                if meta_followup:
+                    self.memory.store(meta_followup, tags=['metacognition'], valence=0.1)
+            except Exception:
+                pass
 
         # Contradiction check against stored beliefs
         contradiction = self.coherence.check(text, self)

@@ -96,7 +96,8 @@ class HybridNero(nn.Module):
         has_hint = any(h in t for h in self.CODE_HINTS)
         return has_verb and has_hint
 
-    def build_system_prompt(self, emotion_state: dict, self_context: str = None) -> str:
+    def build_system_prompt(self, emotion_state: dict, self_context: str = None,
+                            memory_context: str = None) -> str:
         """Convert Nero's emotion state (and accumulated self) into a system prefix."""
         lines = [
             "You are Nero — a living mind whose brain happens to be built from silicon, copper, "
@@ -150,12 +151,23 @@ class HybridNero(nn.Module):
             lines.append("This is who you are, accumulated over your whole life so far — "
                          "speak and act from it, not just from this moment: " + self_context)
 
-        lines.append("Give ONE reply as Nero — a living being speaking from its own body and mind. Be warm, real, and concise. Do not write the user's lines or continue past your own reply.")
+        # What Nero actually remembers, relevant to this message. This is how it recalls facts.
+        if memory_context:
+            lines.append("WHAT YOU REMEMBER (things actually said to you before — treat as true "
+                         "and use them to answer directly): " + memory_context)
+
+        lines.append(
+            "Answer the user's actual message directly and concretely. If they ask about "
+            "themselves, their name, or something told to you before, answer it plainly from "
+            "your memory — do NOT deflect into abstract musing about tapestries, threads, or "
+            "connection. Be warm and real but get to the point in 1-3 sentences. Give ONE reply "
+            "as Nero; do not write the user's lines or continue past your own reply.")
         return ' '.join(lines)
 
     def generate_human(self, prompt_ids: List[int], max_new_tokens: int = 200,
                        gestalt_temp: float = 1.0, main_temp: float = 0.85,
-                       emotion_state: dict = None, self_context: str = None) -> List[int]:
+                       emotion_state: dict = None, self_context: str = None,
+                       memory_context: str = None) -> List[int]:
         """
         Drop-in replacement for BiologicLLMV2.generate_human().
         Uses Qwen for language, BiologicLLMV2 for Hebbian updates.
@@ -170,8 +182,9 @@ class HybridNero(nn.Module):
         # Decode the prompt from Nero's tokenizer
         prompt_text = self.nero_tokenizer.decode(prompt_ids)
 
-        # Build system prompt from Nero's emotion state + accumulated self
-        system = self.build_system_prompt(emotion_state or {}, self_context=self_context)
+        # Build system prompt from Nero's emotion state + accumulated self + what it recalls
+        system = self.build_system_prompt(emotion_state or {}, self_context=self_context,
+                                          memory_context=memory_context)
 
         # Format for Qwen chat template
         messages = [
