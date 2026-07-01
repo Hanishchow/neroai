@@ -1099,6 +1099,9 @@ class Mind:
                     creations=(self.coder.creation_count if self.coder else 0),
                     value_texts=vtexts,
                 )
+                # personality slowly tilts Nero's emotional set-point
+                if self.emotions and hasattr(self.emotions, 'apply_temperament'):
+                    self.emotions.apply_temperament(self.personality.traits())
             except Exception:
                 pass
 

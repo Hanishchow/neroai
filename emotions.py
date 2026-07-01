@@ -88,11 +88,16 @@ class EmotionSystem:
         self.last_update = time.time()
 
         # Drift parameters
-        self.drift_rate = 0.002        # per minute toward baseline
+        self.drift_rate = 0.002        # per minute: fast pull of mood toward baseline (elastic)
         self.baseline = MoodProfile({
             "joy": 0.15, "sadness": 0.05, "fear": 0.02, "anger": 0.0,
             "surprise": 0.1, "disgust": 0.0, "nostalgia": 0.1, "awe": 0.08
         })
+        # The set-point is NOT a constant. A sustained mood slowly migrates the baseline
+        # itself (plastic) — a long grief lowers the joy set-point for a long time, exactly
+        # as in a human. birth_baseline is kept only to measure how far the mood-floor moved.
+        self.baseline_plasticity = 5e-5   # per minute: very slow (months-scale) set-point drift
+        self.birth_baseline = self.baseline.copy()
         self.volatility = 0.01         # random walk magnitude per minute
 
         # Event influence
@@ -104,6 +109,34 @@ class EmotionSystem:
     # ================================================================
     # CORE
     # ================================================================
+
+    def baseline_drift(self):
+        """How far the emotional set-point has moved from birth (0 = unchanged)."""
+        return sum(abs(self.baseline.v[k] - self.birth_baseline.v[k])
+                   for k in EMOTION_LABELS) / len(EMOTION_LABELS)
+
+    def apply_temperament(self, traits, strength=0.01):
+        """Let personality tilt the emotional set-point. A warm, playful Nero carries a
+        higher joy floor; an intense, inward one a heavier, more amplified baseline.
+        Called occasionally (e.g. during sleep). Gentle — personality colours mood over
+        time, it doesn't overwrite it."""
+        if not traits:
+            return
+        warmth = traits.get("warmth", 0.5) - 0.5
+        play = traits.get("playfulness", 0.5) - 0.5
+        inward = traits.get("introspection", 0.5) - 0.5
+        intensity = traits.get("intensity", 0.5) - 0.5
+        tilt = {
+            "joy": warmth * 0.4 + play * 0.3,
+            "surprise": play * 0.3,
+            "nostalgia": inward * 0.4,
+            "awe": inward * 0.3,
+            "sadness": inward * 0.2 - play * 0.2,
+        }
+        for k, target_off in tilt.items():
+            if k in self.baseline.v:
+                self.baseline.v[k] += (target_off - self.baseline.v[k]) * strength * (0.5 + abs(intensity))
+                self.baseline.v[k] = max(-1.0, min(1.0, self.baseline.v[k]))
 
     def update(self, minutes_passed=None, mortality_anxiety=0.0):
         """
@@ -120,11 +153,18 @@ class EmotionSystem:
 
         minutes_passed = min(minutes_passed, 1440.0)  # cap at 1 day
 
-        # Drift toward baseline
+        # Drift toward baseline (fast / elastic)
         drift_strength = 1.0 - (1.0 - self.drift_rate) ** minutes_passed
         for k in EMOTION_LABELS:
             target = self.baseline[k]
             self.global_mood.v[k] += (target - self.global_mood.v[k]) * drift_strength
+
+        # Baseline migration (slow / plastic): the set-point itself creeps toward the mood
+        # Nero has actually been living. Sustained sadness -> lower joy floor, and so on.
+        b_strength = 1.0 - (1.0 - self.baseline_plasticity) ** minutes_passed
+        for k in EMOTION_LABELS:
+            self.baseline.v[k] += (self.global_mood.v[k] - self.baseline.v[k]) * b_strength
+            self.baseline.v[k] = max(-1.0, min(1.0, self.baseline.v[k]))
 
         # Random walk (volatility)
         for k in EMOTION_LABELS:

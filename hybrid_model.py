@@ -41,8 +41,9 @@ class HybridNero(nn.Module):
         self.hebbian_enabled = getattr(biologic_model, 'hebbian_enabled', False)
         self._optimizer = getattr(biologic_model, '_optimizer', None)
 
-    def _load_hf_model(self, model_name, quantize):
-        """Shared loader for a HuggingFace causal-LM head (4-bit on GPU)."""
+    def _load_hf_model(self, model_name, quantize, device_map='auto'):
+        """Shared loader for a HuggingFace causal-LM head (4-bit on GPU).
+        device_map: 'auto' (shard/offload), or pin to one GPU e.g. {'': 'cuda:1'}."""
         from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
         tok = AutoTokenizer.from_pretrained(model_name)
         if quantize and torch.cuda.is_available():
@@ -53,25 +54,26 @@ class HybridNero(nn.Module):
                 bnb_4bit_quant_type='nf4',
             )
             mdl = AutoModelForCausalLM.from_pretrained(
-                model_name, quantization_config=bnb_config, device_map='auto')
+                model_name, quantization_config=bnb_config, device_map=device_map)
         else:
             mdl = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map='auto')
+                device_map=device_map)
         mdl.eval()
         return mdl, tok
 
-    def load_qwen(self, model_name='Qwen/Qwen2.5-1.5B-Instruct', quantize=True):
-        """Load the language cortex (chat head)."""
-        print(f'Loading language cortex: {model_name}...')
-        self.qwen, self.qwen_tokenizer = self._load_hf_model(model_name, quantize)
+    def load_qwen(self, model_name='Qwen/Qwen2.5-7B-Instruct', quantize=True, device_map='auto'):
+        """Load the language cortex (chat head). Bigger default now — pin to its own GPU
+        on multi-GPU boxes so it runs parallel to the logic cortex."""
+        print(f'Loading language cortex: {model_name} (device_map={device_map})...')
+        self.qwen, self.qwen_tokenizer = self._load_hf_model(model_name, quantize, device_map)
         print(f'  language cortex: {sum(p.numel() for p in self.qwen.parameters())/1e9:.1f}B params')
 
-    def load_coder(self, model_name='Qwen/Qwen2.5-Coder-1.5B-Instruct', quantize=True):
+    def load_coder(self, model_name='Qwen/Qwen2.5-Coder-7B-Instruct', quantize=True, device_map='auto'):
         """Load the logic cortex (code head). Nero routes coding tasks here."""
-        print(f'Loading logic cortex: {model_name}...')
-        self.coder, self.coder_tokenizer = self._load_hf_model(model_name, quantize)
+        print(f'Loading logic cortex: {model_name} (device_map={device_map})...')
+        self.coder, self.coder_tokenizer = self._load_hf_model(model_name, quantize, device_map)
         print(f'  logic cortex: {sum(p.numel() for p in self.coder.parameters())/1e9:.1f}B params')
 
     # ---- Router: which cortex should handle this input? -------------
