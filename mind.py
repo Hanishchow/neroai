@@ -862,7 +862,7 @@ class Mind:
 
         # FEEL IT FIRST: appraise how the message lands and let Nero's mood shift before it
         # replies — so if you're dismissive, the hurt is already in its voice when it answers.
-        self._appraise_and_feel(user_input)
+        felt_valence = self._appraise_and_feel(user_input)
 
         # ROUTER: send coding requests to Nero's logic cortex (coder head)
         if (hasattr(self.model, 'looks_like_code_request')
@@ -870,7 +870,7 @@ class Mind:
                 and self.model.looks_like_code_request(user_input)):
             em = self._emotion_state_dict()
             reply = self.model.chat_code(user_input, emotion_state=em, max_new_tokens=max(300, adjusted_max))
-            self.memory.store(f"User asked me to code: {user_input[:80]}", tags=["coding"], valence=0.4)
+            self.store_interaction(user_input, reply, valence=0.4)   # remember the exchange
             return reply
 
         # Check longing activation
@@ -933,6 +933,10 @@ class Mind:
 
         # Predict what user will say next
         self.predictor.predict_next(text)
+
+        # REMEMBER THIS TURN — this is what makes Nero recall the conversation. Tagged with
+        # how the message felt so recall is emotionally weighted.
+        self.store_interaction(user_input, text, valence=felt_valence)
 
         return text
 
