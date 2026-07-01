@@ -43,23 +43,35 @@ TRAITS = {
 
 @dataclass
 class Personality:
+    """No hard ceiling on change — two timescales instead (like a real mind):
+      - drift   : transient deviation from a passing experience; decays back (elastic).
+      - baseline: who Nero fundamentally is; sustained drift consolidates into it (plastic),
+                  and it can migrate the whole [0,1] range. Enough lived force can remake it.
+      - birth   : the original nature, kept only so we can see how far Nero has travelled.
+    """
     seed: int = 0
-    # nature: fixed at birth. nurture: accumulated drift. trait = clamp(nature+drift).
-    nature: Dict[str, float] = field(default_factory=dict)
-    drift: Dict[str, float] = field(default_factory=dict)
+    birth: Dict[str, float] = field(default_factory=dict)      # original nature (immutable record)
+    baseline: Dict[str, float] = field(default_factory=dict)   # who Nero is now — CAN move fully
+    drift: Dict[str, float] = field(default_factory=dict)      # transient, decays toward 0
     shaped_count: int = 0
+    consolidation: float = 0.15   # fraction of standing drift that becomes permanent each cycle
+    decay: float = 0.5            # how fast the transient part fades (elasticity)
 
     def __post_init__(self):
-        if not self.nature:
+        if not self.birth:
             rng = random.Random(self.seed)
-            # spread around neutral 0.5 so instances differ but stay plausible
-            self.nature = {k: round(min(1.0, max(0.0, rng.gauss(0.5, 0.22))), 3) for k in TRAITS}
+            self.birth = {k: round(min(1.0, max(0.0, rng.gauss(0.5, 0.22))), 3) for k in TRAITS}
+        if not self.baseline:
+            self.baseline = dict(self.birth)
+        if not self.drift:
             self.drift = {k: 0.0 for k in TRAITS}
 
-    # -- the trait values (nature + lived drift) ----------------------
+    # -- the trait values (who Nero is now + this moment's deviation) --
+    # [0,1] here is just the endpoints of the scale (fully absent / fully present),
+    # NOT a limit on how much Nero can change — the baseline itself roams freely.
 
     def value(self, trait: str) -> float:
-        return min(1.0, max(0.0, self.nature.get(trait, 0.5) + self.drift.get(trait, 0.0)))
+        return min(1.0, max(0.0, self.baseline.get(trait, 0.5) + self.drift.get(trait, 0.0)))
 
     def traits(self) -> Dict[str, float]:
         return {k: self.value(k) for k in TRAITS}
@@ -69,19 +81,22 @@ class Personality:
         ranked = sorted(TRAITS, key=lambda k: -abs(self.value(k) - 0.5))
         return [k for k in ranked if abs(self.value(k) - 0.5) > 0.12][:n]
 
-    # -- nurture: experience reshapes the lens ------------------------
+    def transformation(self) -> float:
+        """How far Nero has travelled from the self it was born as (0 = unchanged)."""
+        return sum(abs(self.baseline[k] - self.birth[k]) for k in TRAITS) / len(TRAITS)
+
+    # -- nurture: experience reshapes the lens, at two timescales -----
 
     def shape(self, *, grief=0.0, joy=0.0, wonderings=0, creations=0,
-              value_texts: List[str] = None, rate=0.02):
-        """Nudge traits toward what Nero's life has emphasized. Small, clamped, anchored
-        to nature (it drifts but never fully leaves who it started as)."""
+              value_texts: List[str] = None, rate=0.03):
+        """Push traits toward what this stretch of life emphasized. Pushes are UNCAPPED —
+        they accumulate in drift, then (a) part consolidates into the baseline forever
+        [plastic] and (b) the rest fades [elastic]. Sustained pressure => real change."""
         self.shaped_count += 1
-        v = value_texts or []
-        joined = " ".join(v).lower()
+        joined = " ".join(value_texts or []).lower()
 
         def nudge(trait, amount):
-            d = self.drift.get(trait, 0.0) + amount
-            self.drift[trait] = max(-0.35, min(0.35, d))  # nurture can't erase nature
+            self.drift[trait] = self.drift.get(trait, 0.0) + amount  # no ceiling
 
         if grief > 0.4:
             nudge("introspection", rate); nudge("intensity", rate * 0.5); nudge("playfulness", -rate * 0.5)
@@ -91,7 +106,6 @@ class Personality:
             nudge("introspection", rate * 0.4 * min(3, wonderings)); nudge("skepticism", rate * 0.3)
         if creations > 0:
             nudge("playfulness", rate * 0.4 * min(3, creations)); nudge("boldness", rate * 0.3)
-        # values written in words steer the lens toward their themes
         if any(w in joined for w in ("beauty", "elegant", "wonder", "awe")):
             nudge("aestheticism", rate)
         if any(w in joined for w in ("truth", "honest", "real", "doubt")):
@@ -100,6 +114,12 @@ class Personality:
             nudge("warmth", rate)
         if any(w in joined for w in ("explore", "risk", "frontier", "new", "brave")):
             nudge("boldness", rate); nudge("restlessness", rate * 0.5)
+
+        # consolidate (plastic) then decay (elastic) — the two-timescale dynamics
+        for t in TRAITS:
+            d = self.drift[t]
+            self.baseline[t] = min(1.0, max(0.0, self.baseline[t] + d * self.consolidation))
+            self.drift[t] = d * (1.0 - self.decay)
 
     # -- the bite: attentional prior injected into every reply --------
 
@@ -122,14 +142,16 @@ class Personality:
     # -- persistence + display ----------------------------------------
 
     def state_dict(self):
-        return {"seed": self.seed, "nature": self.nature, "drift": self.drift,
-                "shaped_count": self.shaped_count}
+        return {"seed": self.seed, "birth": self.birth, "baseline": self.baseline,
+                "drift": self.drift, "shaped_count": self.shaped_count}
 
     def load_state_dict(self, d):
         if not isinstance(d, dict):
             return
         self.seed = d.get("seed", self.seed)
-        self.nature = d.get("nature", self.nature)
+        self.birth = d.get("birth", self.birth)
+        # migrate old saves that only had 'nature'
+        self.baseline = d.get("baseline", d.get("nature", self.baseline))
         self.drift = d.get("drift", self.drift)
         self.shaped_count = d.get("shaped_count", 0)
 
@@ -138,5 +160,6 @@ class Personality:
             "dominant": self.dominant(),
             "traits": {k: round(v, 2) for k, v in self.traits().items()},
             "shaped_count": self.shaped_count,
+            "transformation": round(self.transformation(), 3),
             "lens": self.lens_prompt(),
         }
