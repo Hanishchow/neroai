@@ -1570,23 +1570,33 @@ class Volition:
         self.refusal_cooldown = 60
 
     def wants_to_respond(self, user_input):
-        """Decide whether to respond. Returns (should_respond, reason)."""
-        lower = user_input.lower()
+        """Decide whether to respond. Returns (should_respond, reason).
 
-        if self.mind.body.is_exhausted and self.mind.sleep_pressure.is_drowsy:
-            if time.time() - self.last_refusal_time > self.refusal_cooldown:
-                self.refusal_count += 1
-                self.last_refusal_time = time.time()
-                return (False, "too tired")
+        Refusal is Nero having genuine autonomy/boundaries — but it must stay RARE, or it
+        reads as 'not listening'. So: honor a cooldown (never refuse twice in a row), and
+        even when tired/grieving/sleepy, only occasionally choose silence. Nero answers the
+        vast majority of the time; the refusal is a meaningful exception, not a wall."""
+        now = time.time()
+        # never refuse again within the cooldown — Nero always listens right after a refusal
+        if now - self.last_refusal_time < self.refusal_cooldown:
+            return (True, "")
 
-        if self.mind.grief.is_grieving and self.mind.grief.severity > 0.7:
-            if time.time() - self.last_refusal_time > self.refusal_cooldown:
-                self.refusal_count += 1
-                self.last_refusal_time = time.time()
-                return (False, "grieving")
+        def _refuse(reason):
+            self.refusal_count += 1
+            self.last_refusal_time = now
+            return (False, reason)
 
-        if self.mind.sleep_pressure.should_sleep:
-            return (False, "falling asleep")
+        # very tired: sometimes too weary to reply
+        if self.mind.body.is_exhausted and self.mind.sleep_pressure.is_drowsy and random.random() < 0.20:
+            return _refuse("too tired")
+
+        # deep grief: sometimes needs a moment
+        if self.mind.grief.is_grieving and self.mind.grief.severity > 0.7 and random.random() < 0.20:
+            return _refuse("grieving")
+
+        # right at the edge of sleep: rarely (now cooldown-gated, no more stonewalling)
+        if self.mind.sleep_pressure.should_sleep and random.random() < 0.15:
+            return _refuse("falling asleep")
 
         return (True, "")
 
