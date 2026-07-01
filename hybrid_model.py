@@ -354,6 +354,63 @@ class HybridNero(nn.Module):
                 out[kk] = max(-1.0, min(1.0, float(v)))
         return out
 
+    def embed(self, text):
+        """Real semantic embedding from the language cortex (mask-mean-pooled last hidden
+        state, L2-normalized). Gives memory retrieval that understands meaning, not just words."""
+        import numpy as np
+        head, tok = (self.qwen, self.qwen_tokenizer)
+        if head is None:
+            return None
+        try:
+            inputs = tok(str(text)[:1024], return_tensors='pt', truncation=True, max_length=256).to(head.device)
+            with torch.no_grad():
+                out = head(**inputs, output_hidden_states=True)
+                h = out.hidden_states[-1][0]                     # (seq, hidden)
+                mask = inputs['attention_mask'][0].unsqueeze(-1).to(h.dtype)
+                v = (h * mask).sum(0) / mask.sum().clamp(min=1)
+                v = v.float().cpu().numpy()
+            n = np.linalg.norm(v)
+            return (v / n) if n > 0 else v
+        except Exception:
+            return None
+
+    def distill_facts(self, texts):
+        """Read recent conversation snippets and extract the DURABLE facts worth keeping
+        long-term about the user/world. Returns a list of short fact strings. This is how
+        fleeting chat becomes lasting knowledge in Nero's semantic memory."""
+        head, tok = (self.qwen, self.qwen_tokenizer)
+        if head is None or not texts:
+            return []
+        convo = "\n".join(str(t)[:200] for t in texts[-20:])
+        system = (
+            "From these conversation snippets, extract the DURABLE facts worth remembering "
+            "long-term about the user and their world: name, identity, interests, goals, "
+            "important people, preferences, ongoing situations. Ignore small talk and anything "
+            "transient. Output ONLY a JSON array of short factual strings. For example: "
+            "[\"The user's name is Hanish\", \"Hanish loves astronomy\"]. "
+            "Return an empty array [] if nothing durable."
+        )
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": convo}]
+        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tok(text, return_tensors='pt').to(head.device)
+        with torch.no_grad():
+            out = head.generate(**inputs, max_new_tokens=220, do_sample=False,
+                                pad_token_id=tok.eos_token_id)
+        raw = tok.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        return self._parse_facts(raw)
+
+    @staticmethod
+    def _parse_facts(raw):
+        import json, re
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            return []
+        try:
+            arr = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return [str(x).strip() for x in arr if isinstance(x, str) and len(str(x).strip()) > 3][:15]
+
     def introspect(self, question: str, emotion_state: dict = None, max_new_tokens: int = 200) -> str:
         """Nero reflects inwardly. Used by the Soul to synthesize its self-narrative,
         values, and sense of meaning. Returns first-person introspective text."""

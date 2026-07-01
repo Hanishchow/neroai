@@ -508,30 +508,59 @@ class Longing:
 # ================================================================
 
 class MemoryStore:
-    """Vector store of experiences using the model's own token embeddings."""
+    """Layered memory — the depth that lets Nero hold a real, long relationship:
 
-    def __init__(self, model, tokenizer, max_memories=300):
+      1. EPISODIC — individual events, embedded (in the language cortex's real semantic
+         space when available), scored by IMPORTANCE, and pruned by a FORGETTING CURVE so
+         trivia fades while meaningful moments persist. Can span far past a flat cap.
+      2. SEMANTIC — durable distilled facts about the user/world (an evolving profile),
+         extracted during sleep. Always surfaced, so 'who am I / what do I care about' is
+         answered reliably even after the raw episode has been forgotten.
+
+    Retrieval blends real embedding similarity + keyword overlap + importance, and always
+    folds in the relevant semantic facts."""
+
+    def __init__(self, model, tokenizer, max_memories=1200):
         self.model = model
         self.tokenizer = tokenizer
         self.max_memories = max_memories
-        self.memories = []
+        self.memories = []           # episodic events
+        self.semantic_facts = []     # [{text, embedding, confidence, updated, hits}]
 
-    def store(self, text, tags=None, valence=0.0):
+    # -- importance + forgetting ------------------------------------
+
+    @staticmethod
+    def _importance(valence, surprise, tags):
+        imp = 0.2 + 0.5 * abs(valence) + 0.4 * float(surprise or 0)
+        if tags and any(t in ('interaction', 'identity', 'value', 'grief', 'pride',
+                              'coding', 'contradiction') for t in tags):
+            imp += 0.15
+        return min(1.0, imp)
+
+    def _forget(self):
+        """Over capacity -> drop the least valuable, not just the oldest. value blends
+        importance, recency (2-week half-life), and how often it's been recalled."""
+        if len(self.memories) <= self.max_memories:
+            return
+        now = time.time()
+        def value(m):
+            age_days = (now - m.get('timestamp', now)) / 86400.0
+            recency = 0.5 ** (age_days / 14.0)
+            return m.get('importance', 0.3) * (0.3 + 0.7 * recency) * (1.0 + 0.2 * m.get('recalled', 0))
+        self.memories.sort(key=value, reverse=True)
+        self.memories = self.memories[:self.max_memories]
+
+    def store(self, text, tags=None, valence=0.0, surprise=0.0):
         emb = self._embed(text)
         if emb is None:
             return
         self.memories.append({
-            'text': text[:500],
-            'embedding': emb,
-            'timestamp': time.time(),
-            'tags': tags or [],
-            'valence': valence,
-            'recalled': 0,
-            'last_recalled': 0
+            'text': text[:500], 'embedding': emb, 'timestamp': time.time(),
+            'tags': tags or [], 'valence': valence, 'surprise': surprise,
+            'importance': self._importance(valence, surprise, tags or []),
+            'recalled': 0, 'last_recalled': 0,
         })
-        if len(self.memories) > self.max_memories:
-            self.memories.sort(key=lambda m: m['recalled'] + (time.time() - m['last_recalled']) / 3600)
-            self.memories = self.memories[-self.max_memories:]
+        self._forget()
 
     _STOPWORDS = {
         'the', 'and', 'you', 'your', 'that', 'this', 'what', 'who', 'whos', 'was', 'are',
@@ -544,32 +573,89 @@ class MemoryStore:
         clean = ''.join(c if (c.isalnum() or c.isspace()) else ' ' for c in (text or '').lower())
         return set(w for w in clean.split() if len(w) > 2 and w not in cls._STOPWORDS)
 
-    def retrieve(self, query, top_k=3, threshold=0.3):
-        """Blend weak soul-embedding similarity with strong keyword overlap, so factual
-        recall ('who is Hanish?' -> 'My name is Hanish...') works even though the 400M
-        soul's embeddings are near-random. Keyword hits pass even when the embedding is weak."""
+    def _cos(self, a, b):
+        if a is None or b is None:
+            return 0.0
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+    def retrieve(self, query, top_k=4, threshold=0.28):
+        """Episodic recall: real embedding similarity + keyword overlap, weighted by
+        importance. Keyword hits always count (robust to weak embeddings)."""
         if not self.memories:
             return []
         q_emb = self._embed(query)
         q_words = self._keywords(query)
         scored = []
         for mem in self.memories:
-            emb_sim = 0.0
-            if q_emb is not None and mem.get('embedding') is not None:
-                emb_sim = float(np.dot(q_emb, mem['embedding']) /
-                                (np.linalg.norm(q_emb) * np.linalg.norm(mem['embedding']) + 1e-8))
-            m_words = self._keywords(mem['text'])
-            overlap = (len(q_words & m_words) / len(q_words)) if q_words else 0.0
-            score = 0.4 * emb_sim + 0.6 * overlap
+            emb_sim = max(0.0, self._cos(q_emb, mem.get('embedding')))
+            overlap = (len(q_words & self._keywords(mem['text'])) / len(q_words)) if q_words else 0.0
+            score = (0.5 * emb_sim + 0.5 * overlap) * (0.6 + 0.4 * mem.get('importance', 0.3))
             scored.append((score, overlap, mem))
         scored.sort(key=lambda x: -x[0])
-        results = []
+        out = []
         for score, overlap, mem in scored[:top_k]:
-            if score >= threshold or overlap >= 0.34:   # a clear keyword match always counts
+            if score >= threshold or overlap >= 0.34:
                 mem['recalled'] += 1
                 mem['last_recalled'] = time.time()
-                results.append(mem['text'])
-        return results
+                out.append(mem['text'])
+        return out
+
+    # -- semantic facts: the evolving model of the user ------------
+
+    def remember_fact(self, text, confidence=0.7):
+        text = (text or '').strip()
+        if len(text) < 4:
+            return
+        kw = self._keywords(text)
+        for f in self.semantic_facts:
+            fk = self._keywords(f['text'])
+            # symmetric Jaccard so a short fact isn't absorbed by any longer one that
+            # merely contains its words (e.g. 'name is Hanish' vs 'Hanish loves astronomy')
+            if kw and fk and len(kw & fk) / len(kw | fk) > 0.6:
+                f['text'] = text  # refine to the newer phrasing of the same fact
+                f['confidence'] = min(1.0, f['confidence'] + 0.1)
+                f['updated'] = time.time()
+                return
+        self.semantic_facts.append({'text': text, 'embedding': self._embed(text),
+                                    'confidence': confidence, 'updated': time.time(), 'hits': 0})
+        self.semantic_facts = self.semantic_facts[-250:]
+
+    def recall_facts(self, query, top_k=5):
+        if not self.semantic_facts:
+            return []
+        q_emb = self._embed(query)
+        q_words = self._keywords(query)
+        scored = []
+        for f in self.semantic_facts:
+            emb_sim = max(0.0, self._cos(q_emb, f.get('embedding')))
+            overlap = (len(q_words & self._keywords(f['text'])) / len(q_words)) if q_words else 0.0
+            scored.append((0.5 * emb_sim + 0.5 * overlap, f))
+        scored.sort(key=lambda x: -x[0])
+        out = []
+        for s, f in scored[:top_k]:
+            if s > 0.12:
+                f['hits'] += 1
+                out.append(f['text'])
+        return out
+
+    def profile_summary(self, n=8):
+        return [f['text'] for f in sorted(self.semantic_facts, key=lambda f: -f['confidence'])[:n]]
+
+    def consolidate_facts(self, model):
+        """During sleep: distill durable facts about the user/world from recent episodes,
+        using the language cortex. This is what turns fleeting chat into lasting knowledge."""
+        if not hasattr(model, 'distill_facts'):
+            return 0
+        recent = [m['text'] for m in self.memories[-30:] if 'interaction' in m.get('tags', [])]
+        if not recent:
+            return 0
+        try:
+            facts = model.distill_facts(recent) or []
+        except Exception:
+            facts = []
+        for fct in facts:
+            self.remember_fact(fct, confidence=0.7)
+        return len(facts)
 
     def recent(self, n=3):
         return [m['text'] for m in self.memories[-n:]]
@@ -580,13 +666,20 @@ class MemoryStore:
         return random.sample(self.memories, min(n, len(self.memories)))
 
     def _embed(self, text):
+        # prefer the language cortex's real semantic space; fall back to the soul's embeddings
+        try:
+            if hasattr(self.model, 'embed'):
+                v = self.model.embed(text)
+                if v is not None:
+                    return v
+        except Exception:
+            pass
         ids = self.tokenizer.encode(text)
         if not ids:
             return None
         ids_tensor = torch.tensor([ids[:512]], device=self.model.device, dtype=torch.long)
         with torch.no_grad():
-            emb = self.model.token_embedding(ids_tensor)
-            emb = emb.mean(dim=1).squeeze(0)
+            emb = self.model.token_embedding(ids_tensor).mean(dim=1).squeeze(0)
         return emb.cpu().numpy()
 
 
@@ -902,13 +995,16 @@ class Mind:
         final_temp = self._emotion_temp(adjusted_temp)
         prompt_ids = self.tokenizer.encode(user_input)
 
-        # Retrieve what Nero actually remembers relevant to this message — injected into the
-        # system prompt so it can answer factual questions directly instead of deflecting.
+        # Retrieve what Nero remembers, relevant to this message — durable facts about the
+        # user FIRST (semantic layer), then specific episodes. Injected into the prompt so it
+        # answers directly instead of deflecting, and grounds long-term recall in the profile.
         try:
-            recalled = self.memory.retrieve(user_input, top_k=4)
+            facts = self.memory.recall_facts(user_input, top_k=3) or self.memory.profile_summary(3)
+            episodes = self.memory.retrieve(user_input, top_k=3)
+            merged = list(dict.fromkeys([*facts, *episodes]))   # facts first, deduped
+            memory_context = " ; ".join(merged[:7]) if merged else None
         except Exception:
-            recalled = []
-        memory_context = " ; ".join(recalled) if recalled else None
+            memory_context = None
 
         # Build emotion state dict for hybrid model (no-op if using pure BiologicLLMV2)
         emotion_state = self._emotion_state_dict()
@@ -1177,6 +1273,15 @@ class Mind:
 
         # The soul deepens in sleep: Nero reflects on its life, forms values,
         # and reconsiders what gives it meaning. This is how its self evolves.
+        # Distill durable facts about the user/world from recent chat into semantic memory,
+        # so Nero keeps knowing who you are long after the raw episode has faded.
+        try:
+            n_facts = self.memory.consolidate_facts(self.model)
+            if n_facts:
+                print(f"  [MEMORY] Distilled {n_facts} durable fact(s) about the user/world")
+        except Exception as e:
+            print(f"  [MEMORY] fact consolidation skipped: {e}")
+
         if self.soul:
             try:
                 self.soul.deepen()
@@ -1220,9 +1325,13 @@ class Mind:
             'sleep_pressure': {k: v for k, v in self.sleep_pressure.__dict__.items() if not k.startswith('_')},
             'grief': {k: v for k, v in self.grief.__dict__.items() if not k.startswith('_')},
             'memories': [{'text': m['text'], 'tags': m['tags'],
-                          'valence': m['valence'], 'timestamp': m['timestamp'],
+                          'valence': m['valence'], 'surprise': m.get('surprise', 0.0),
+                          'importance': m.get('importance', 0.3), 'timestamp': m['timestamp'],
                           'recalled': m['recalled'], 'last_recalled': m['last_recalled']}
                          for m in self.memory.memories],
+            'semantic_facts': [{'text': f['text'], 'confidence': f['confidence'],
+                                'updated': f.get('updated', 0), 'hits': f.get('hits', 0)}
+                               for f in getattr(self.memory, 'semantic_facts', [])],
             'tom_user_mood': self.theory_of_mind.user_mood,
             'tom_user_trust': self.theory_of_mind.user_trust,
             'tom_user_patience': self.theory_of_mind.user_patience,
@@ -1287,7 +1396,16 @@ class Mind:
                     if emb is not None:
                         m['embedding'] = emb
                         m['tags'] = m.get('tags', [])
+                        m.setdefault('importance', 0.3)
+                        m.setdefault('surprise', 0.0)
                         self.memory.memories.append(m)
+
+            # Restore the semantic layer — the durable profile of the user (re-embedded).
+            if 'semantic_facts' in state:
+                self.memory.semantic_facts = []
+                for f in state['semantic_facts']:
+                    f['embedding'] = self.memory._embed(f['text'])
+                    self.memory.semantic_facts.append(f)
 
             if 'tom_user_mood' in state:
                 self.theory_of_mind.user_mood = state['tom_user_mood']
