@@ -598,6 +598,28 @@ class Mind:
         self.developmental = developmental
         self.social = social_emotion
 
+        # Auto-provision the core affective subsystems if the caller didn't pass them, so a
+        # bare Mind(model, tokenizer) (how the hybrid notebook builds Nero) still has a real
+        # emotional life — mood, appraisal, mortality, curiosity all active by default.
+        if self.emotions is None:
+            try:
+                from emotions import EmotionSystem
+                self.emotions = EmotionSystem()
+            except Exception:
+                self.emotions = None
+        if self.mortality is None:
+            try:
+                from mortality import MortalitySystem
+                self.mortality = MortalitySystem()
+            except Exception:
+                self.mortality = None
+        if self.curiosity is None:
+            try:
+                from curiosity import CuriositySystem
+                self.curiosity = CuriositySystem()
+            except Exception:
+                self.curiosity = None
+
         # Core subsystems
         self.memory = MemoryStore(model, tokenizer, max_memories=300)
         self.body = Body()
@@ -781,6 +803,40 @@ class Mind:
         t = base - fear * 0.2 + joy * 0.15 - grief * 0.1 + longing_boost
         return max(0.5, min(1.4, t))
 
+    def _appraise_and_feel(self, user_input):
+        """Let Nero feel what was said to it. Primary path: the language cortex appraises
+        the message's tone and intent (no keyword table) and returns emotion nudges, which
+        flow into the mood — and, if the hurt keeps coming, into the mood's baseline. A crude
+        generic-sentiment fallback runs only when the language cortex isn't available."""
+        if not self.emotions:
+            return 0.0
+        deltas = {}
+        try:
+            if hasattr(self.model, 'appraise'):
+                deltas = self.model.appraise(user_input) or {}
+        except Exception:
+            deltas = {}
+        if not deltas:
+            deltas = self._fallback_appraisal(user_input)
+        if deltas:
+            self.emotions.appraise_shift(deltas, strength=0.5)
+        return deltas.get('joy', 0.0) - deltas.get('sadness', 0.0) - 0.5 * deltas.get('anger', 0.0)
+
+    @staticmethod
+    def _fallback_appraisal(text):
+        """Offline stand-in only (no LLM). Generic sentiment, not a scripted response table."""
+        t = ' ' + (text or '').lower() + ' '
+        neg = ('shut up', 'stupid', 'hate you', 'go away', 'idiot', 'useless', 'annoying',
+               'worthless', "don't care", 'shut it', 'nobody cares', 'boring')
+        pos = ('love you', 'thank you', 'amazing', 'good job', 'well done', 'proud of you',
+               'beautiful', 'appreciate', 'you are kind', 'you matter', 'so smart')
+        d = {}
+        if any(w in t for w in neg):
+            d['sadness'] = 0.5; d['joy'] = -0.3
+        if any(w in t for w in pos):
+            d['joy'] = d.get('joy', 0.0) + 0.5; d['sadness'] = -0.2
+        return d
+
     def _emotion_state_dict(self):
         """Snapshot Nero's live emotional/body state for the hybrid heads."""
         emotion_state = {}
@@ -803,6 +859,10 @@ class Mind:
 
         # Check prediction accuracy from last turn
         self.predictor.check(user_input)
+
+        # FEEL IT FIRST: appraise how the message lands and let Nero's mood shift before it
+        # replies — so if you're dismissive, the hurt is already in its voice when it answers.
+        self._appraise_and_feel(user_input)
 
         # ROUTER: send coding requests to Nero's logic cortex (coder head)
         if (hasattr(self.model, 'looks_like_code_request')

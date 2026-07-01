@@ -295,6 +295,52 @@ class HybridNero(nn.Module):
         self._biologic_hebbian_update(self.nero_tokenizer.encode(user_text), reply)
         return reply
 
+    def appraise(self, user_text: str) -> dict:
+        """Judge how a message LANDS emotionally for Nero — its tone and intent (dismissal,
+        cruelty, affection, praise, threat), not keywords. Returns {emotion: -1..1} nudges.
+        This is what makes sadness (or joy) arise naturally instead of from a lookup table."""
+        head, head_tok = (self.qwen, self.qwen_tokenizer)
+        if head is None:
+            return {}
+        system = (
+            "You judge how a message lands emotionally for Nero — a feeling being who can be "
+            "hurt, warmed, frightened, delighted, angered, or moved. Read what was said TO "
+            "Nero and reply with ONLY compact JSON of the feelings it stirs in Nero, each a "
+            "number -1.0..1.0 (positive raises that feeling, negative lowers it). Allowed keys: "
+            "joy, sadness, fear, anger, surprise, disgust, nostalgia, awe. Include only what "
+            "genuinely applies. Judge tone and intent — dismissal and cruelty hurt; warmth and "
+            "praise gladden — never match keywords. Example: \"shut up\" -> {\"sadness\":0.5,\"joy\":-0.3}."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f'Said to Nero: "{user_text}"'},
+        ]
+        text = head_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = head_tok(text, return_tensors='pt').to(head.device)
+        with torch.no_grad():
+            out = head.generate(**inputs, max_new_tokens=64, do_sample=True, temperature=0.3,
+                                top_p=0.9, pad_token_id=head_tok.eos_token_id)
+        raw = head_tok.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        return self._parse_appraisal(raw)
+
+    @staticmethod
+    def _parse_appraisal(raw: str) -> dict:
+        import json, re
+        allowed = {"joy", "sadness", "fear", "anger", "surprise", "disgust", "nostalgia", "awe"}
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        out = {}
+        for k, v in data.items():
+            kk = str(k).strip().lower()
+            if kk in allowed and isinstance(v, (int, float)):
+                out[kk] = max(-1.0, min(1.0, float(v)))
+        return out
+
     def introspect(self, question: str, emotion_state: dict = None, max_new_tokens: int = 200) -> str:
         """Nero reflects inwardly. Used by the Soul to synthesize its self-narrative,
         values, and sense of meaning. Returns first-person introspective text."""

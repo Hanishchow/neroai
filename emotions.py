@@ -185,6 +185,18 @@ class EmotionSystem:
             delta = (event_mood[k] - self.global_mood[k]) * strength
             self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] + delta))
 
+    def appraise_shift(self, deltas, strength=0.5):
+        """Apply emotion nudges from an APPRAISAL of something that just happened to Nero.
+        `deltas` is {emotion: -1..1} produced by understanding a message's meaning (not a
+        keyword table). The nudge lands on the live mood; normal drift then eases it back,
+        and — via baseline plasticity — sustained hurt slowly sinks Nero's mood floor."""
+        if not deltas:
+            return
+        for k, d in deltas.items():
+            if k in self.global_mood.v and isinstance(d, (int, float)):
+                self.global_mood.v[k] = max(-1.0, min(1.0, self.global_mood.v[k] + float(d) * strength))
+        self._record_mood()
+
     def get_cue_bias(self, cue_text=""):
         """
         Return a multiplier for memory recall scoring.
