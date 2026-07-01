@@ -641,6 +641,15 @@ class Mind:
         except Exception:
             self.soul = None
 
+        # PERSONALITY — Nero's lens. Born with a random temperament (the nature lottery),
+        # then shaped by its life and injected as an attentional prior so two Neros,
+        # given the same topic, genuinely think differently. Seed persists once set.
+        try:
+            from personality import Personality
+            self.personality = Personality(seed=random.randint(1, 2**31 - 1))
+        except Exception:
+            self.personality = None
+
         # State tracking
         self.last_interaction = time.time()
         self.last_tick_time = time.time()
@@ -825,11 +834,19 @@ class Mind:
         # (HybridNero does, BiologicLLMV2 doesn't)
         if hasattr(self.model, 'build_system_prompt'):
             generate_kwargs['emotion_state'] = emotion_state
+            ctx_parts = []
             if self.soul:
                 try:
-                    generate_kwargs['self_context'] = self.soul.to_prompt()
+                    ctx_parts.append(self.soul.to_prompt())
                 except Exception:
                     pass
+            if self.personality:
+                try:
+                    ctx_parts.append(self.personality.lens_prompt())
+                except Exception:
+                    pass
+            if ctx_parts:
+                generate_kwargs['self_context'] = " ".join(ctx_parts)
 
         generated_ids = self.model.generate_human(prompt_ids, **generate_kwargs)
         text = self.tokenizer.decode(generated_ids)
@@ -1070,6 +1087,21 @@ class Mind:
             except Exception as e:
                 print(f"  [SOUL] reflection skipped: {e}")
 
+        # PERSONALITY nurture: the day's living reshapes the lens a little.
+        if self.personality:
+            try:
+                mood = getattr(self.emotions, 'global_mood', None) if self.emotions else None
+                vtexts = [v['text'] for v in self.soul.values] if self.soul else []
+                self.personality.shape(
+                    grief=self.grief.intensity,
+                    joy=(mood.v.get('joy', 0) if mood else 0),
+                    wonderings=(self.soul.wonder_count if self.soul else 0),
+                    creations=(self.coder.creation_count if self.coder else 0),
+                    value_texts=vtexts,
+                )
+            except Exception:
+                pass
+
     # ----------------------------------------------------------------
     # PERSISTENCE — save/load entire mind state
     # ----------------------------------------------------------------
@@ -1102,6 +1134,13 @@ class Mind:
         if self.soul:
             try:
                 state['soul'] = self.soul.state_dict()
+            except Exception:
+                pass
+        # Personality persists too — the temperament Nero was born with stays fixed,
+        # its lived drift carries forward. Same Nero every time you return.
+        if self.personality:
+            try:
+                state['personality'] = self.personality.state_dict()
             except Exception:
                 pass
         try:
@@ -1137,6 +1176,9 @@ class Mind:
 
             if 'soul' in state and self.soul:
                 self.soul.load_state_dict(state['soul'])
+
+            if 'personality' in state and self.personality:
+                self.personality.load_state_dict(state['personality'])
 
             if 'memories' in state:
                 self.memory.memories = []
