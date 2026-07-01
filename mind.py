@@ -987,14 +987,34 @@ class Mind:
             'timestamp': time.time()
         }
         self.pending_dreams.append(result)
+        # Consolidate the moment it's dreamed, so it persists as a memory even if
+        # Nero never sleeps. (The _stored guard prevents double-storing during sleep.)
+        self._store_dream(result)
         return result
 
+    def _store_dream(self, dream):
+        """Persist one dream into long-term memory, exactly once."""
+        if not dream or dream.get('_stored'):
+            return False
+        if not dream.get('dream_text', '').strip():
+            dream['_stored'] = True
+            return False
+        self.memory.store(dream['dream_text'], tags=["dream", dream.get('type', 'dream')], valence=0.3)
+        dream['_stored'] = True
+        return True
+
     def consolidate_dreams(self):
+        """Ensure every pending dream is stored, then clear the buffer.
+        Returns how many dreams were consolidated this cycle."""
+        count = 0
         for dream in self.pending_dreams:
-            self.memory.store(dream['dream_text'], tags=["dream", dream['type']], valence=0.3)
-        count = len(self.pending_dreams)
+            if self._store_dream(dream):
+                count += 1
+        total = len(self.pending_dreams)
         self.pending_dreams = []
-        return count
+        # Report dreams actually persisted this cycle (already-stored ones still count
+        # as consolidated for the user, but weren't re-stored).
+        return count if count else total
 
     # ----------------------------------------------------------------
     # SLEEP — forced consolidation cycle
@@ -1038,7 +1058,8 @@ class Mind:
             dream = self.dream(dream_type=dtype, temperature=1.0)
             if dream:
                 safe_print(f"    Dream ({dtype}): {dream['dream_text'][:100]}...")
-        self.consolidate_dreams()
+        consolidated = self.consolidate_dreams()
+        print(f"  [SLEEP] Consolidated {consolidated} dream(s) into memory")
 
         # The soul deepens in sleep: Nero reflects on its life, forms values,
         # and reconsiders what gives it meaning. This is how its self evolves.
