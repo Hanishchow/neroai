@@ -104,6 +104,33 @@ if args.api:
     def health():
         return {"status": "ok", "params": sum(p.numel() for p in model.parameters())}
 
+    # --- Nero's voice (KittenTTS): POST text, get back a spoken wav ---
+    from voice import NeroVoice
+    _voice = NeroVoice(enabled=True)
+
+    from typing import Optional
+
+    class SpeakRequest(BaseModel):
+        text: str
+        voice: Optional[str] = None
+
+    @app.post("/speak")
+    def speak_api(req: SpeakRequest):
+        import io
+        from fastapi import Response
+        # Per-call voice — no shared-state mutation, so concurrent requests never race.
+        wav = _voice.synth(req.text, voice=req.voice)
+        if wav is None:
+            return Response(status_code=503, content="voice unavailable (install kittentts + espeak-ng)")
+        buf = io.BytesIO()
+        import wave, numpy as np
+        clipped = np.clip(np.asarray(wav, dtype=np.float32), -1.0, 1.0)
+        pcm = (clipped * 32767.0).astype("<i2")
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+            w.writeframes(pcm.tobytes())
+        return Response(content=buf.getvalue(), media_type="audio/wav")
+
     # Run both
     threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=args.port+1), daemon=True).start()
 

@@ -1,0 +1,9 @@
+# Nero's voice (KittenTTS). Optional — Nero runs text-only without these.
+# Linux/Colab/Kaggle also need the espeak-ng system package:
+#     apt-get install -y espeak-ng
+# The KittenTTS model is ~80M and runs on CPU (no GPU needed).
+
+https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl
+soundfile
+numpy
+sounddevice   # desktop playback only; not needed in notebooks

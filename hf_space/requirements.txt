@@ -1,0 +1,11 @@
+# Nero HF Space (CPU). torch CPU wheel is provided by the Space base image.
+# NOTE: gradio is NOT listed here — a Gradio Space installs it from `sdk_version` in
+# README.md. Listing it again would conflict with that pin.
+torch
+transformers>=4.43
+accelerate>=0.30
+huggingface_hub>=0.24
+numpy
+soundfile
+# Nero's voice — KittenTTS (tiny CPU TTS). espeak-ng comes from packages.txt.
+https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl

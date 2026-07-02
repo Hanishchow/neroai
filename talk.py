@@ -4,6 +4,7 @@ Nero — talk mode.  200M params.  No training.  No growth.  Just conversation.
 import sys, os, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tokenizer import BPETokenizer
+from voice import NeroVoice
 
 def safe_print(text):
     for ch in text:
@@ -150,6 +151,20 @@ def main():
                 narrative=narrative, developmental=developmental, social_emotion=social)
     mind.load_state()
 
+    # --- Voice (KittenTTS). Off by default on the CLI; enable with --voice. ---
+    voice_on = '--voice' in sys.argv
+    nero_voice = NeroVoice(enabled=voice_on)
+    mind.voice = nero_voice  # Nero owns its own larynx
+    if voice_on:
+        print(f"  {nero_voice.status()}")
+
+    def say(reply):
+        if nero_voice.enabled and reply:
+            try:
+                nero_voice.speak(reply, mood=getattr(emotions, 'global_mood', None))
+            except Exception as e:
+                print(f"  (voice hiccup: {e})")
+
     print("\nReady. Type 'help' for commands.")
     last_tick = time.time()
 
@@ -179,8 +194,23 @@ def main():
             print("  dream              daydream")
             print("  state              mind state")
             print("  grow               trigger neural growth (one-time)")
+            print("  voice [on|off|<name>]  toggle/select Nero's spoken voice")
             print("  help               this")
             print("  exit               quit")
+            continue
+
+        if cmd == 'voice' or cmd.startswith('voice '):
+            arg = user_input[6:].strip()
+            if not arg or arg.lower() in ('on', 'off'):
+                if arg.lower() == 'on':
+                    nero_voice.on()
+                elif arg.lower() == 'off':
+                    nero_voice.off()
+                else:
+                    nero_voice.toggle()
+            elif nero_voice.set_voice(arg.capitalize()):
+                nero_voice.on()
+            print(f"  {nero_voice.status()}")
             continue
 
         if cmd == 'grow':
@@ -235,13 +265,16 @@ def main():
         reply = mind.generate(question, max_new=300, temperature=0.85)
         if reply:
             safe_print(f"  {reply}")
+            say(reply)
         else:
             prompt = f"User: {question}\n"
             prompt_ids = tokenizer.encode(prompt)
             if len(prompt_ids) >= 2:
                 prompt_ids = prompt_ids[:model.max_context - 300 - 2]
                 gen = model.generate_human(prompt_ids, max_new_tokens=300, gestalt_temp=1.4, main_temp=0.85)
-                safe_print(f"  {tokenizer.decode(gen)}")
+                spoken = tokenizer.decode(gen)
+                safe_print(f"  {spoken}")
+                say(spoken)
 
     print("Goodbye.")
 
